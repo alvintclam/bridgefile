@@ -99,7 +99,7 @@ export async function connect(config: S3Config): Promise<string> {
     );
   } catch (err: any) {
     client.destroy();
-    throw new Error(`S3 connection failed: ${err.message}`);
+    throw new Error(friendlyS3Error(err, config.bucket));
   }
 
   // Normalise root prefix
@@ -141,56 +141,60 @@ export async function list(connId: string, virtualPath: string): Promise<FileEnt
   const entries: FileEntry[] = [];
   let continuationToken: string | undefined;
 
-  do {
-    const resp = await conn.client.send(
-      new ListObjectsV2Command({
-        Bucket: conn.bucket,
-        Prefix: prefix,
-        Delimiter: '/',
-        ContinuationToken: continuationToken,
-        MaxKeys: 1000,
-      }),
-    );
+  try {
+    do {
+      const resp = await conn.client.send(
+        new ListObjectsV2Command({
+          Bucket: conn.bucket,
+          Prefix: prefix,
+          Delimiter: '/',
+          ContinuationToken: continuationToken,
+          MaxKeys: 1000,
+        }),
+      );
 
-    // Directories (common prefixes)
-    for (const cp of resp.CommonPrefixes ?? []) {
-      if (!cp.Prefix) continue;
-      const dirName = cp.Prefix.slice(prefix.length).replace(/\/$/, '');
-      if (!dirName) continue; // skip self
+      // Directories (common prefixes)
+      for (const cp of resp.CommonPrefixes ?? []) {
+        if (!cp.Prefix) continue;
+        const dirName = cp.Prefix.slice(prefix.length).replace(/\/$/, '');
+        if (!dirName) continue; // skip self
 
-      const displayPath = stripRootPrefix(conn, cp.Prefix);
-      entries.push({
-        name: dirName,
-        path: '/' + displayPath.replace(/\/$/, ''),
-        size: 0,
-        modifiedAt: 0,
-        isDirectory: true,
-      });
-    }
+        const displayPath = stripRootPrefix(conn, cp.Prefix);
+        entries.push({
+          name: dirName,
+          path: '/' + displayPath.replace(/\/$/, ''),
+          size: 0,
+          modifiedAt: 0,
+          isDirectory: true,
+        });
+      }
 
-    // Files
-    for (const obj of resp.Contents ?? []) {
-      if (!obj.Key) continue;
-      // Skip the "directory marker" itself
-      if (obj.Key === prefix) continue;
+      // Files
+      for (const obj of resp.Contents ?? []) {
+        if (!obj.Key) continue;
+        // Skip the "directory marker" itself
+        if (obj.Key === prefix) continue;
 
-      const fileName = obj.Key.slice(prefix.length);
-      // Skip if this looks like a nested path (shouldn't happen with Delimiter)
-      if (fileName.includes('/')) continue;
+        const fileName = obj.Key.slice(prefix.length);
+        // Skip if this looks like a nested path (shouldn't happen with Delimiter)
+        if (fileName.includes('/')) continue;
 
-      const displayPath = stripRootPrefix(conn, obj.Key);
-      entries.push({
-        name: fileName,
-        path: '/' + displayPath,
-        size: obj.Size ?? 0,
-        modifiedAt: obj.LastModified?.getTime() ?? 0,
-        isDirectory: false,
-        meta: obj.StorageClass ? { storageClass: obj.StorageClass } : undefined,
-      });
-    }
+        const displayPath = stripRootPrefix(conn, obj.Key);
+        entries.push({
+          name: fileName,
+          path: '/' + displayPath,
+          size: obj.Size ?? 0,
+          modifiedAt: obj.LastModified?.getTime() ?? 0,
+          isDirectory: false,
+          meta: obj.StorageClass ? { storageClass: obj.StorageClass } : undefined,
+        });
+      }
 
-    continuationToken = resp.NextContinuationToken;
-  } while (continuationToken);
+      continuationToken = resp.NextContinuationToken;
+    } while (continuationToken);
+  } catch (err: any) {
+    throw new Error(friendlyS3Error(err, conn.bucket));
+  }
 
   // Directories first, then alphabetical
   entries.sort((a, b) => {
@@ -221,14 +225,18 @@ export async function upload(
     onProgress?.(transferred, total);
   });
 
-  await conn.client.send(
-    new PutObjectCommand({
-      Bucket: conn.bucket,
-      Key: key,
-      Body: body,
-      ContentLength: total,
-    }),
-  );
+  try {
+    await conn.client.send(
+      new PutObjectCommand({
+        Bucket: conn.bucket,
+        Key: key,
+        Body: body,
+        ContentLength: total,
+      }),
+    );
+  } catch (err: any) {
+    throw new Error(friendlyS3Error(err, conn.bucket));
+  }
 }
 
 export async function download(
@@ -240,12 +248,17 @@ export async function download(
   const conn = getConn(connId);
   const key = resolveKey(conn, remotePath);
 
-  const resp = await conn.client.send(
-    new GetObjectCommand({
-      Bucket: conn.bucket,
-      Key: key,
-    }),
-  );
+  let resp;
+  try {
+    resp = await conn.client.send(
+      new GetObjectCommand({
+        Bucket: conn.bucket,
+        Key: key,
+      }),
+    );
+  } catch (err: any) {
+    throw new Error(friendlyS3Error(err, conn.bucket));
+  }
 
   const total = resp.ContentLength ?? 0;
 
@@ -283,14 +296,18 @@ export async function mkdir(connId: string, dirPath: string): Promise<void> {
   let key = resolveKey(conn, dirPath);
   if (!key.endsWith('/')) key += '/';
 
-  await conn.client.send(
-    new PutObjectCommand({
-      Bucket: conn.bucket,
-      Key: key,
-      Body: '',
-      ContentLength: 0,
-    }),
-  );
+  try {
+    await conn.client.send(
+      new PutObjectCommand({
+        Bucket: conn.bucket,
+        Key: key,
+        Body: '',
+        ContentLength: 0,
+      }),
+    );
+  } catch (err: any) {
+    throw new Error(friendlyS3Error(err, conn.bucket));
+  }
 }
 
 /**
@@ -502,6 +519,35 @@ export async function deleteDir(connId: string, dirPath: string): Promise<void> 
 }
 
 // ── Helpers ────────────────────────────────────────────────────
+
+/**
+ * Translate common S3 error codes into user-friendly messages.
+ */
+function friendlyS3Error(err: any, bucket: string): string {
+  const code: string = err?.name ?? err?.Code ?? '';
+  const msg: string = err?.message ?? String(err);
+
+  if (code === 'AccessDenied' || /Access Denied/i.test(msg)) {
+    return 'Access denied. Check your IAM permissions.';
+  }
+  if (code === 'NoSuchBucket' || /NoSuchBucket/i.test(msg)) {
+    return `Bucket not found: ${bucket}`;
+  }
+  if (code === 'InvalidAccessKeyId' || /InvalidAccessKeyId/i.test(msg)) {
+    return 'Invalid access key. Check your credentials.';
+  }
+  if (code === 'SignatureDoesNotMatch' || /SignatureDoesNotMatch/i.test(msg)) {
+    return 'Invalid secret key. Check your credentials.';
+  }
+  if (code === 'NoSuchKey' || /NoSuchKey/i.test(msg)) {
+    return `Object not found in bucket "${bucket}".`;
+  }
+  if (/ENOTFOUND|getaddrinfo/i.test(msg)) {
+    return `S3 endpoint not reachable. Check your region or custom endpoint.`;
+  }
+
+  return `S3 error: ${msg}`;
+}
 
 /**
  * Strip the root prefix from a key to get the virtual path the UI shows.

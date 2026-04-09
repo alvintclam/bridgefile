@@ -56,9 +56,29 @@ export async function connect(config: FTPConfig): Promise<string> {
       secure: config.secure ?? false,
       secureOptions: config.secureOptions,
     });
+    await client.useDefaultSettings();
   } catch (err: any) {
     client.close();
-    throw new Error(`FTP connection failed: ${err.message}`);
+
+    const msg = err.message ?? String(err);
+
+    if (msg.includes('ECONNREFUSED')) {
+      throw new Error(`FTP connection refused. Is the server running on ${config.host}:${config.port ?? 21}?`);
+    }
+    if (msg.includes('ENOTFOUND') || msg.includes('getaddrinfo')) {
+      throw new Error(`FTP host not found: "${config.host}". Check the hostname or DNS.`);
+    }
+    if (msg.includes('ETIMEDOUT') || msg.includes('timeout')) {
+      throw new Error(`FTP connection timed out to ${config.host}:${config.port ?? 21}. Check firewall rules.`);
+    }
+    if (/530|login|auth/i.test(msg)) {
+      throw new Error(`FTP login failed for user "${config.username}". Check your username and password.`);
+    }
+    if (/certificate|SSL|TLS/i.test(msg)) {
+      throw new Error(`FTP TLS/SSL error: ${msg}. Try toggling the "Secure" option or allowing self-signed certs.`);
+    }
+
+    throw new Error(`FTP connection failed: ${msg}`);
   }
 
   pool.set(id, {
@@ -82,7 +102,20 @@ export async function disconnect(connId: string): Promise<void> {
 export async function list(connId: string, dirPath: string): Promise<FileEntry[]> {
   const { client } = getConn(connId);
 
-  const entries: FileInfo[] = await client.list(dirPath);
+  let entries: FileInfo[] = await client.list(dirPath);
+
+  // Some FTP servers return empty at "/" because the user lands in a
+  // different working directory.  Fall back to the server-reported cwd.
+  if (entries.length === 0 && dirPath === '/') {
+    try {
+      const cwd = await client.pwd();
+      if (cwd && cwd !== '/') {
+        entries = await client.list(cwd);
+      }
+    } catch {
+      // Ignore — best-effort fallback
+    }
+  }
 
   const result: FileEntry[] = entries
     .filter((entry) => entry.name !== '.' && entry.name !== '..')

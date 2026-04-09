@@ -1,4 +1,4 @@
-import React, { useState, useRef, useEffect } from 'react';
+import React, { useState, useRef, useEffect, useCallback } from 'react';
 
 export type LogLevel = 'info' | 'success' | 'error' | 'warning';
 
@@ -9,21 +9,91 @@ export interface LogEntry {
   message: string;
 }
 
-const MOCK_LOGS: LogEntry[] = [
-  { id: '1', timestamp: new Date('2026-04-08T10:00:00'), level: 'info', message: 'BridgeFile started' },
-  { id: '2', timestamp: new Date('2026-04-08T10:00:05'), level: 'info', message: 'Connecting to 192.168.1.100:22 via SFTP...' },
-  { id: '3', timestamp: new Date('2026-04-08T10:00:06'), level: 'success', message: 'Connected to 192.168.1.100 as deploy' },
-  { id: '4', timestamp: new Date('2026-04-08T10:00:07'), level: 'info', message: 'Listing remote directory /' },
-  { id: '5', timestamp: new Date('2026-04-08T10:00:08'), level: 'info', message: 'Found 5 items in /' },
-  { id: '6', timestamp: new Date('2026-04-08T10:01:15'), level: 'info', message: 'Starting upload: node-v24.13.0.tar.gz (40.9 MB)' },
-  { id: '7', timestamp: new Date('2026-04-08T10:02:30'), level: 'success', message: 'Upload complete: node-v24.13.0.tar.gz' },
-  { id: '8', timestamp: new Date('2026-04-08T10:02:35'), level: 'info', message: 'Starting upload: design-mockup.fig (15.0 MB)' },
-  { id: '9', timestamp: new Date('2026-04-08T10:03:00'), level: 'warning', message: 'Transfer speed dropped below 1 MB/s' },
-  { id: '10', timestamp: new Date('2026-04-08T10:03:45'), level: 'info', message: 'Starting download: db-2026-04-07.sql.gz (50.0 MB)' },
-  { id: '11', timestamp: new Date('2026-04-08T10:04:00'), level: 'error', message: 'Download failed: auth.log - Connection timed out' },
-  { id: '12', timestamp: new Date('2026-04-08T10:04:01'), level: 'info', message: 'Retrying download: auth.log (attempt 2/3)' },
-  { id: '13', timestamp: new Date('2026-04-08T10:05:00'), level: 'success', message: 'Upload complete: report-q1.pdf' },
-];
+// ── Event-emitter-based global log bus ─────────────────────────
+
+type LogListener = (entry: LogEntry) => void;
+
+const listeners = new Set<LogListener>();
+let nextId = 1;
+
+/**
+ * Add a log entry from anywhere in the renderer process.
+ *
+ * ```ts
+ * import { addLog } from './LogPanel';
+ * addLog('info', 'Connected to 192.168.1.100');
+ * addLog('error', 'Upload failed: permission denied');
+ * ```
+ */
+export function addLog(level: LogLevel, message: string): void {
+  const entry: LogEntry = {
+    id: String(nextId++),
+    timestamp: new Date(),
+    level,
+    message,
+  };
+  for (const fn of listeners) {
+    fn(entry);
+  }
+}
+
+/** Subscribe to new log entries. Returns an unsubscribe function. */
+function subscribe(fn: LogListener): () => void {
+  listeners.add(fn);
+  return () => {
+    listeners.delete(fn);
+  };
+}
+
+// ── Convenience helpers for common log patterns ────────────────
+
+export function logConnection(protocol: string, host: string, user?: string): void {
+  const who = user ? ` as ${user}` : '';
+  addLog('info', `Connecting to ${host} via ${protocol}...`);
+  // The caller should follow up with logConnected / logError
+  void who; // used above
+}
+
+export function logConnected(protocol: string, host: string, user?: string): void {
+  const who = user ? ` as ${user}` : '';
+  addLog('success', `Connected to ${host}${who} (${protocol})`);
+}
+
+export function logDisconnected(host: string): void {
+  addLog('info', `Disconnected from ${host}`);
+}
+
+export function logTransferStart(action: 'upload' | 'download', name: string, sizeBytes?: number): void {
+  const size = sizeBytes != null ? ` (${formatSize(sizeBytes)})` : '';
+  addLog('info', `Starting ${action}: ${name}${size}`);
+}
+
+export function logTransferComplete(action: 'upload' | 'download', name: string): void {
+  addLog('success', `${capitalize(action)} complete: ${name}`);
+}
+
+export function logError(message: string): void {
+  addLog('error', message);
+}
+
+export function logWarning(message: string): void {
+  addLog('warning', message);
+}
+
+function capitalize(s: string): string {
+  return s.charAt(0).toUpperCase() + s.slice(1);
+}
+
+function formatSize(bytes: number): string {
+  if (bytes < 1024) return `${bytes} B`;
+  if (bytes < 1024 * 1024) return `${(bytes / 1024).toFixed(1)} KB`;
+  if (bytes < 1024 * 1024 * 1024) return `${(bytes / (1024 * 1024)).toFixed(1)} MB`;
+  return `${(bytes / (1024 * 1024 * 1024)).toFixed(1)} GB`;
+}
+
+// ── Component ──────────────────────────────────────────────────
+
+const MAX_LOG_ENTRIES = 5000;
 
 const LEVEL_STYLES: Record<LogLevel, string> = {
   info: 'text-[#71717a]',
@@ -49,9 +119,26 @@ function formatTime(date: Date): string {
 }
 
 export default function LogPanel() {
-  const [logs, setLogs] = useState<LogEntry[]>(MOCK_LOGS);
+  const [logs, setLogs] = useState<LogEntry[]>([]);
   const [autoScroll, setAutoScroll] = useState(true);
   const scrollRef = useRef<HTMLDivElement>(null);
+
+  // Subscribe to log bus
+  useEffect(() => {
+    const unsubscribe = subscribe((entry) => {
+      setLogs((prev) => {
+        const next = [...prev, entry];
+        // Cap entries to prevent memory issues
+        return next.length > MAX_LOG_ENTRIES ? next.slice(-MAX_LOG_ENTRIES) : next;
+      });
+    });
+    return unsubscribe;
+  }, []);
+
+  // Emit a startup log on mount
+  useEffect(() => {
+    addLog('info', 'BridgeFile started');
+  }, []);
 
   useEffect(() => {
     if (autoScroll && scrollRef.current) {
@@ -59,21 +146,21 @@ export default function LogPanel() {
     }
   }, [logs, autoScroll]);
 
-  const handleScroll = () => {
+  const handleScroll = useCallback(() => {
     if (!scrollRef.current) return;
     const { scrollTop, scrollHeight, clientHeight } = scrollRef.current;
     const isAtBottom = scrollHeight - scrollTop - clientHeight < 20;
     setAutoScroll(isAtBottom);
-  };
+  }, []);
 
-  const clearLogs = () => {
+  const clearLogs = useCallback(() => {
     setLogs([]);
-  };
+  }, []);
 
-  const copyEntry = (entry: LogEntry) => {
+  const copyEntry = useCallback((entry: LogEntry) => {
     const text = `[${formatTime(entry.timestamp)}] [${entry.level.toUpperCase()}] ${entry.message}`;
     navigator.clipboard?.writeText(text);
-  };
+  }, []);
 
   return (
     <div className="flex flex-col h-full">

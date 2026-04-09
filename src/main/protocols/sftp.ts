@@ -41,6 +41,87 @@ function getConn(connId: string): PooledConnection {
   return conn;
 }
 
+/**
+ * Create a fresh SSH + SFTP connection using the same config, replacing the
+ * stale entry in the pool.  Returns the new PooledConnection.
+ */
+async function reconnect(connId: string): Promise<PooledConnection> {
+  const old = pool.get(connId);
+  if (!old) throw new Error(`SFTP connection "${connId}" not found or expired`);
+
+  // Tear down the old client (ignore errors — it may already be dead)
+  try { old.client.end(); } catch { /* noop */ }
+
+  return new Promise<PooledConnection>((resolve, reject) => {
+    const client = new Client();
+
+    const connectConfig: Record<string, unknown> = {
+      host: old.config.host,
+      port: old.config.port ?? 22,
+      username: old.config.username,
+      readyTimeout: 15_000,
+      keepaliveInterval: 10_000,
+    };
+
+    if (old.config.privateKey) {
+      connectConfig.privateKey = old.config.privateKey;
+      if (old.config.passphrase) connectConfig.passphrase = old.config.passphrase;
+    } else if (old.config.password) {
+      connectConfig.password = old.config.password;
+    }
+
+    client.on('ready', () => {
+      client.sftp((err, sftp) => {
+        if (err) {
+          client.end();
+          return reject(new Error(`SFTP subsystem failed on reconnect: ${err.message}`));
+        }
+
+        const entry: PooledConnection = {
+          id: connId,
+          client,
+          sftp,
+          config: old.config,
+          lastActivity: Date.now(),
+        };
+        pool.set(connId, entry);
+        resolve(entry);
+      });
+    });
+
+    client.on('error', (err) => {
+      reject(new Error(`SSH reconnect failed: ${err.message}`));
+    });
+
+    client.connect(connectConfig as any);
+  });
+}
+
+/**
+ * Execute an async operation with one automatic reconnect attempt.
+ * If `fn` throws an error that looks like a broken/stale connection,
+ * we reconnect and retry exactly once.
+ */
+async function withReconnect<T>(
+  connId: string,
+  fn: (conn: PooledConnection) => Promise<T>,
+): Promise<T> {
+  const conn = getConn(connId);
+  try {
+    return await fn(conn);
+  } catch (err: any) {
+    const msg: string = err?.message ?? '';
+    const isStale =
+      /ECONNRESET|EPIPE|end of stream|Not connected|No response|channel open failure/i.test(msg);
+
+    if (!isStale) throw err;
+
+    // One reconnect attempt
+    const fresh = await reconnect(connId);
+    return fn(fresh);
+  }
+}
+
 // ── Public API ─────────────────────────────────────────────────
 
 export async function connect(config: SFTPConfig): Promise<string> {
@@ -101,31 +182,31 @@ export async function disconnect(connId: string): Promise<void> {
 }
 
 export async function list(connId: string, dirPath: string): Promise<FileEntry[]> {
-  const { sftp } = getConn(connId);
+  return withReconnect(connId, ({ sftp }) => {
+    return new Promise((resolve, reject) => {
+      sftp.readdir(dirPath, (err, entries) => {
+        if (err) return reject(new Error(`Failed to list "${dirPath}": ${err.message}`));
 
-  return new Promise((resolve, reject) => {
-    sftp.readdir(dirPath, (err, entries) => {
-      if (err) return reject(new Error(`Failed to list "${dirPath}": ${err.message}`));
+        const result: FileEntry[] = entries.map((entry) => {
+          const isDir = (entry.attrs.mode & 0o40000) !== 0;
+          return {
+            name: entry.filename,
+            path: path.posix.join(dirPath, entry.filename),
+            size: entry.attrs.size,
+            modifiedAt: entry.attrs.mtime * 1000,
+            isDirectory: isDir,
+            permissions: formatPermissions(entry.attrs.mode),
+          };
+        });
 
-      const result: FileEntry[] = entries.map((entry) => {
-        const isDir = (entry.attrs.mode & 0o40000) !== 0;
-        return {
-          name: entry.filename,
-          path: path.posix.join(dirPath, entry.filename),
-          size: entry.attrs.size,
-          modifiedAt: entry.attrs.mtime * 1000,
-          isDirectory: isDir,
-          permissions: formatPermissions(entry.attrs.mode),
-        };
+        // Directories first, then alphabetical
+        result.sort((a, b) => {
+          if (a.isDirectory !== b.isDirectory) return a.isDirectory ? -1 : 1;
+          return a.name.localeCompare(b.name);
+        });
+
+        resolve(result);
       });
-
-      // Directories first, then alphabetical
-      result.sort((a, b) => {
-        if (a.isDirectory !== b.isDirectory) return a.isDirectory ? -1 : 1;
-        return a.name.localeCompare(b.name);
-      });
-
-      resolve(result);
     });
   });
 }
@@ -136,29 +217,30 @@ export async function upload(
   remotePath: string,
   onProgress?: (transferred: number, total: number) => void,
 ): Promise<void> {
-  const { sftp } = getConn(connId);
-  const stat = fs.statSync(localPath);
-  const total = stat.size;
+  return withReconnect(connId, ({ sftp }) => {
+    const fileStat = fs.statSync(localPath);
+    const total = fileStat.size;
 
-  return new Promise((resolve, reject) => {
-    const readStream = fs.createReadStream(localPath);
-    const writeStream = sftp.createWriteStream(remotePath);
-    let transferred = 0;
+    return new Promise((resolve, reject) => {
+      const readStream = fs.createReadStream(localPath);
+      const writeStream = sftp.createWriteStream(remotePath);
+      let transferred = 0;
 
-    readStream.on('data', (chunk: Buffer) => {
-      transferred += chunk.length;
-      onProgress?.(transferred, total);
+      readStream.on('data', (chunk: Buffer) => {
+        transferred += chunk.length;
+        onProgress?.(transferred, total);
+      });
+
+      writeStream.on('close', () => resolve());
+      writeStream.on('error', (err: Error) =>
+        reject(new Error(`Upload failed: ${err.message}`)),
+      );
+      readStream.on('error', (err: Error) =>
+        reject(new Error(`Read failed: ${err.message}`)),
+      );
+
+      readStream.pipe(writeStream);
     });
-
-    writeStream.on('close', () => resolve());
-    writeStream.on('error', (err: Error) =>
-      reject(new Error(`Upload failed: ${err.message}`)),
-    );
-    readStream.on('error', (err: Error) =>
-      reject(new Error(`Read failed: ${err.message}`)),
-    );
-
-    readStream.pipe(writeStream);
   });
 }
 
@@ -168,9 +250,7 @@ export async function download(
   localPath: string,
   onProgress?: (transferred: number, total: number) => void,
 ): Promise<void> {
-  const { sftp } = getConn(connId);
-
-  // Get remote file size first
+  // Get remote file size first (also benefits from reconnect)
   const remoteStat = await stat(connId, remotePath);
   const total = remoteStat.size;
 
@@ -178,35 +258,37 @@ export async function download(
   const dir = path.dirname(localPath);
   fs.mkdirSync(dir, { recursive: true });
 
-  return new Promise((resolve, reject) => {
-    const readStream = sftp.createReadStream(remotePath);
-    const writeStream = fs.createWriteStream(localPath);
-    let transferred = 0;
+  return withReconnect(connId, ({ sftp }) => {
+    return new Promise((resolve, reject) => {
+      const readStream = sftp.createReadStream(remotePath);
+      const writeStream = fs.createWriteStream(localPath);
+      let transferred = 0;
 
-    readStream.on('data', (chunk: Buffer) => {
-      transferred += chunk.length;
-      onProgress?.(transferred, total);
+      readStream.on('data', (chunk: Buffer) => {
+        transferred += chunk.length;
+        onProgress?.(transferred, total);
+      });
+
+      writeStream.on('close', () => resolve());
+      writeStream.on('error', (err: Error) =>
+        reject(new Error(`Write failed: ${err.message}`)),
+      );
+      readStream.on('error', (err: Error) =>
+        reject(new Error(`Download failed: ${err.message}`)),
+      );
+
+      readStream.pipe(writeStream);
     });
-
-    writeStream.on('close', () => resolve());
-    writeStream.on('error', (err: Error) =>
-      reject(new Error(`Write failed: ${err.message}`)),
-    );
-    readStream.on('error', (err: Error) =>
-      reject(new Error(`Download failed: ${err.message}`)),
-    );
-
-    readStream.pipe(writeStream);
   });
 }
 
 export async function mkdir(connId: string, dirPath: string): Promise<void> {
-  const { sftp } = getConn(connId);
-
-  return new Promise((resolve, reject) => {
-    sftp.mkdir(dirPath, (err) => {
-      if (err) return reject(new Error(`mkdir failed: ${err.message}`));
-      resolve();
+  return withReconnect(connId, ({ sftp }) => {
+    return new Promise((resolve, reject) => {
+      sftp.mkdir(dirPath, (err) => {
+        if (err) return reject(new Error(`mkdir failed: ${err.message}`));
+        resolve();
+      });
     });
   });
 }
@@ -216,52 +298,53 @@ export async function rename(
   oldPath: string,
   newPath: string,
 ): Promise<void> {
-  const { sftp } = getConn(connId);
-
-  return new Promise((resolve, reject) => {
-    sftp.rename(oldPath, newPath, (err) => {
-      if (err) return reject(new Error(`rename failed: ${err.message}`));
-      resolve();
+  return withReconnect(connId, ({ sftp }) => {
+    return new Promise((resolve, reject) => {
+      sftp.rename(oldPath, newPath, (err) => {
+        if (err) return reject(new Error(`rename failed: ${err.message}`));
+        resolve();
+      });
     });
   });
 }
 
 export async function del(connId: string, targetPath: string): Promise<void> {
-  const { sftp } = getConn(connId);
   const entry = await stat(connId, targetPath);
 
-  return new Promise((resolve, reject) => {
-    if (entry.isDirectory) {
-      sftp.rmdir(targetPath, (err) => {
-        if (err) return reject(new Error(`rmdir failed: ${err.message}`));
-        resolve();
-      });
-    } else {
-      sftp.unlink(targetPath, (err) => {
-        if (err) return reject(new Error(`unlink failed: ${err.message}`));
-        resolve();
-      });
-    }
+  return withReconnect(connId, ({ sftp }) => {
+    return new Promise((resolve, reject) => {
+      if (entry.isDirectory) {
+        sftp.rmdir(targetPath, (err) => {
+          if (err) return reject(new Error(`rmdir failed: ${err.message}`));
+          resolve();
+        });
+      } else {
+        sftp.unlink(targetPath, (err) => {
+          if (err) return reject(new Error(`unlink failed: ${err.message}`));
+          resolve();
+        });
+      }
+    });
   });
 }
 
 export async function stat(connId: string, targetPath: string): Promise<FileEntry> {
-  const { sftp } = getConn(connId);
+  return withReconnect(connId, ({ sftp }) => {
+    return new Promise((resolve, reject) => {
+      sftp.stat(targetPath, (err, attrs) => {
+        if (err) return reject(new Error(`stat failed: ${err.message}`));
 
-  return new Promise((resolve, reject) => {
-    sftp.stat(targetPath, (err, attrs) => {
-      if (err) return reject(new Error(`stat failed: ${err.message}`));
+        const isDir = (attrs.mode & 0o40000) !== 0;
+        const name = path.posix.basename(targetPath) || '/';
 
-      const isDir = (attrs.mode & 0o40000) !== 0;
-      const name = path.posix.basename(targetPath) || '/';
-
-      resolve({
-        name,
-        path: targetPath,
-        size: attrs.size,
-        modifiedAt: attrs.mtime * 1000,
-        isDirectory: isDir,
-        permissions: formatPermissions(attrs.mode),
+        resolve({
+          name,
+          path: targetPath,
+          size: attrs.size,
+          modifiedAt: attrs.mtime * 1000,
+          isDirectory: isDir,
+          permissions: formatPermissions(attrs.mode),
+        });
       });
     });
   });
