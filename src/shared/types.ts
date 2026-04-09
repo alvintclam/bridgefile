@@ -14,6 +14,8 @@ export interface SFTPConfig {
   proxyPort?: number;
   proxyUsername?: string;
   proxyPassword?: string;
+  /** Connection timeout in seconds (default 30) */
+  timeout?: number;
 }
 
 export interface FTPConfig {
@@ -25,6 +27,8 @@ export interface FTPConfig {
   secure: boolean;
   /** Additional TLS options for FTPS connections */
   secureOptions?: { rejectUnauthorized?: boolean };
+  /** Connection timeout in seconds (default 30) */
+  timeout?: number;
 }
 
 export interface S3Config {
@@ -38,6 +42,8 @@ export interface S3Config {
   endpoint?: string;
   /** Force path-style addressing (required for some S3-compatible services) */
   forcePathStyle?: boolean;
+  /** Connection timeout in seconds (default 30) */
+  timeout?: number;
 }
 
 // ── Connection profiles ─────────────────────────────────────────
@@ -193,4 +199,14 @@ export interface IPCChannels {
   // App
   'app:getVersion': () => string;
   'app:getPlatform': () => string;
+  'app:checkForUpdates': () => {
+    hasUpdate: boolean;
+    currentVersion: string;
+    latestVersion: string;
+    downloadUrl: string;
+  };
+  'app:computeChecksum': (filePath: string, algorithm: string) => string;
+
+  // Remote checksum
+  'sftp:computeRemoteChecksum': (connId: string, remotePath: string, algorithm: string) => string;
 }

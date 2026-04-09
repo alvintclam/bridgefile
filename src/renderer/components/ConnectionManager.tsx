@@ -28,6 +28,8 @@ export interface ConnectionProfile {
   bucket?: string;
   prefix?: string;
   endpoint?: string;
+  // Common
+  timeout?: number;
 }
 
 interface ConnectionManagerProps {
@@ -98,6 +100,7 @@ const EMPTY_SFTP: Partial<ConnectionProfile> = {
   proxyPassword: '',
   favorite: false,
   group: '',
+  timeout: 30,
 };
 
 const EMPTY_FTP: Partial<ConnectionProfile> = {
@@ -110,6 +113,7 @@ const EMPTY_FTP: Partial<ConnectionProfile> = {
   secure: false,
   favorite: false,
   group: '',
+  timeout: 30,
 };
 
 const EMPTY_S3: Partial<ConnectionProfile> = {
@@ -123,6 +127,7 @@ const EMPTY_S3: Partial<ConnectionProfile> = {
   endpoint: '',
   favorite: false,
   group: '',
+  timeout: 30,
 };
 
 function isElectron(): boolean {
@@ -234,6 +239,7 @@ export default function ConnectionManager({
           username: profile.username || '',
           password: profile.password,
           privateKey: profile.privateKeyPath,
+          timeout: profile.timeout ?? 30,
         };
         if (profile.proxyHost) {
           sftpConfig.proxyHost = profile.proxyHost;
@@ -249,6 +255,7 @@ export default function ConnectionManager({
           username: profile.username || '',
           password: profile.password || '',
           secure: profile.secure || false,
+          timeout: profile.timeout ?? 30,
         });
       } else {
         // S3
@@ -259,6 +266,7 @@ export default function ConnectionManager({
           bucket: profile.bucket || '',
           prefix: profile.prefix,
           endpoint: profile.endpoint,
+          timeout: profile.timeout ?? 30,
         });
       }
 
@@ -678,6 +686,21 @@ export default function ConnectionManager({
                     </div>
                   )}
                 </div>
+
+                {/* Timeout */}
+                <div className="mb-3">
+                  <label className="block text-[11px] text-[#71717a] mb-1 uppercase tracking-wide">
+                    Timeout (seconds)
+                  </label>
+                  <input
+                    type="number"
+                    value={formData.timeout ?? 30}
+                    onChange={e => updateField('timeout', parseInt(e.target.value) || 30)}
+                    min={1}
+                    max={300}
+                    className="w-24 px-2.5 py-1.5 text-sm bg-[#0a0a0f] border border-[#1e1e2e] rounded text-[#e4e4e7] focus:border-[#3b82f6] focus:outline-none transition-colors"
+                  />
+                </div>
               </>
             ) : activeTab === 'FTP' ? (
               <>
@@ -753,6 +776,21 @@ export default function ConnectionManager({
                       Implicit TLS on port 990 or Explicit TLS on port 21
                     </p>
                   )}
+                </div>
+
+                {/* Timeout */}
+                <div className="mb-3">
+                  <label className="block text-[11px] text-[#71717a] mb-1 uppercase tracking-wide">
+                    Timeout (seconds)
+                  </label>
+                  <input
+                    type="number"
+                    value={formData.timeout ?? 30}
+                    onChange={e => updateField('timeout', parseInt(e.target.value) || 30)}
+                    min={1}
+                    max={300}
+                    className="w-24 px-2.5 py-1.5 text-sm bg-[#0a0a0f] border border-[#1e1e2e] rounded text-[#e4e4e7] focus:border-[#3b82f6] focus:outline-none transition-colors"
+                  />
                 </div>
               </>
             ) : (
@@ -832,6 +870,21 @@ export default function ConnectionManager({
                     onChange={e => updateField('endpoint', e.target.value)}
                     placeholder="https://minio.example.com:9000"
                     className="w-full px-2.5 py-1.5 text-sm bg-[#0a0a0f] border border-[#1e1e2e] rounded text-[#e4e4e7] placeholder-[#71717a] focus:border-[#3b82f6] focus:outline-none transition-colors font-mono text-xs"
+                  />
+                </div>
+
+                {/* Timeout */}
+                <div className="mb-3">
+                  <label className="block text-[11px] text-[#71717a] mb-1 uppercase tracking-wide">
+                    Timeout (seconds)
+                  </label>
+                  <input
+                    type="number"
+                    value={formData.timeout ?? 30}
+                    onChange={e => updateField('timeout', parseInt(e.target.value) || 30)}
+                    min={1}
+                    max={300}
+                    className="w-24 px-2.5 py-1.5 text-sm bg-[#0a0a0f] border border-[#1e1e2e] rounded text-[#e4e4e7] focus:border-[#3b82f6] focus:outline-none transition-colors"
                   />
                 </div>
               </>

@@ -44,7 +44,7 @@ function getConn(connId: string): PooledFTP {
 
 export async function connect(config: FTPConfig): Promise<string> {
   const id = crypto.randomUUID();
-  const client = new FTPClient();
+  const client = new FTPClient((config.timeout ?? 30) * 1000);
   client.ftp.verbose = false;
 
   try {

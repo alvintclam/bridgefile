@@ -2,10 +2,12 @@ import { ipcMain, app, dialog, BrowserWindow } from 'electron';
 import * as os from 'os';
 import * as fs from 'fs';
 import * as path from 'path';
+import * as crypto from 'crypto';
 import * as sftpClient from './protocols/sftp';
 import * as ftpClient from './protocols/ftp';
 import * as s3Client from './protocols/s3';
 import * as store from './store';
+import { checkForUpdates } from './auto-updater';
 import type { FileEntry, TransferItem } from '../shared/types';
 
 // ── In-memory transfer queue ───────────────────────────────────
@@ -695,6 +697,62 @@ export function registerIPCHandlers(): void {
 
       // Clean up temp file
       try { fs.unlinkSync(tmpPath); } catch { /* ignore */ }
+    },
+  );
+
+  // ── Auto-update check ──────────────────────────────────────
+
+  ipcMain.handle('app:checkForUpdates', async () => {
+    try {
+      return await checkForUpdates();
+    } catch {
+      return {
+        hasUpdate: false,
+        currentVersion: app.getVersion(),
+        latestVersion: app.getVersion(),
+        downloadUrl: '',
+      };
+    }
+  });
+
+  // ── Checksum computation ──────────────────────────────────
+
+  ipcMain.handle(
+    'app:computeChecksum',
+    async (_event, filePath: string, algorithm: string) => {
+      return new Promise<string>((resolve, reject) => {
+        const hash = crypto.createHash(algorithm);
+        const stream = fs.createReadStream(filePath);
+
+        stream.on('data', (chunk: Buffer) => hash.update(chunk));
+        stream.on('end', () => resolve(hash.digest('hex')));
+        stream.on('error', (err: Error) =>
+          reject(new Error(`Checksum failed: ${err.message}`)),
+        );
+      });
+    },
+  );
+
+  ipcMain.handle(
+    'sftp:computeRemoteChecksum',
+    async (_event, connId: string, remotePath: string, algorithm: string) => {
+      // Download file to temp, compute hash, clean up
+      const tmpDir = path.join(app.getPath('temp'), 'bridgefile-checksum');
+      fs.mkdirSync(tmpDir, { recursive: true });
+
+      const fileName = path.basename(remotePath);
+      const tmpPath = path.join(tmpDir, `${Date.now()}-${fileName}`);
+
+      await sftpClient.download(connId, remotePath, tmpPath);
+
+      const hash = crypto.createHash(algorithm);
+      const data = fs.readFileSync(tmpPath);
+      hash.update(data);
+      const result = hash.digest('hex');
+
+      try { fs.unlinkSync(tmpPath); } catch { /* ignore */ }
+
+      return result;
     },
   );
 

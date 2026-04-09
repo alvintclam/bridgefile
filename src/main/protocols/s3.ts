@@ -73,11 +73,16 @@ function resolveKey(conn: PooledS3, virtualPath: string): string {
 export async function connect(config: S3Config): Promise<string> {
   const id = crypto.randomUUID();
 
+  const timeoutMs = (config.timeout ?? 30) * 1000;
   const clientConfig: Record<string, unknown> = {
     region: config.region || 'us-east-1',
     credentials: {
       accessKeyId: config.accessKeyId,
       secretAccessKey: config.secretAccessKey,
+    },
+    requestHandler: {
+      connectionTimeout: timeoutMs,
+      requestTimeout: timeoutMs,
     },
   };
 

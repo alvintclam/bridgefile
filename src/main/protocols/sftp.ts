@@ -59,8 +59,11 @@ async function reconnect(connId: string): Promise<PooledConnection> {
       host: old.config.host,
       port: old.config.port ?? 22,
       username: old.config.username,
-      readyTimeout: 15_000,
+      readyTimeout: (old.config.timeout ?? 30) * 1000,
       keepaliveInterval: 10_000,
+      algorithms: {
+        compress: ['zlib@openssh.com', 'zlib', 'none'],
+      },
     };
 
     if (old.config.privateKey) {
@@ -139,8 +142,11 @@ export async function connect(config: SFTPConfig): Promise<string> {
       host: config.host,
       port: config.port ?? 22,
       username: config.username,
-      readyTimeout: 15_000,
+      readyTimeout: (config.timeout ?? 30) * 1000,
       keepaliveInterval: 10_000,
+      algorithms: {
+        compress: ['zlib@openssh.com', 'zlib', 'none'],
+      },
     };
 
     if (config.privateKey) {
@@ -192,8 +198,11 @@ async function connectViaProxy(id: string, config: SFTPConfig): Promise<string> 
       host: config.proxyHost,
       port: config.proxyPort ?? 22,
       username: config.proxyUsername ?? config.username,
-      readyTimeout: 15_000,
+      readyTimeout: (config.timeout ?? 30) * 1000,
       keepaliveInterval: 10_000,
+      algorithms: {
+        compress: ['zlib@openssh.com', 'zlib', 'none'],
+      },
     };
 
     if (config.proxyPassword) {
@@ -220,8 +229,11 @@ async function connectViaProxy(id: string, config: SFTPConfig): Promise<string> 
           const targetConfig: Record<string, unknown> = {
             sock: stream,
             username: config.username,
-            readyTimeout: 15_000,
+            readyTimeout: (config.timeout ?? 30) * 1000,
             keepaliveInterval: 10_000,
+            algorithms: {
+              compress: ['zlib@openssh.com', 'zlib', 'none'],
+            },
           };
 
           if (config.privateKey) {

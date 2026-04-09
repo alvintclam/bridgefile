@@ -40,6 +40,8 @@ const api = {
     ) => ipcRenderer.invoke('sftp:resumeTransfer', connId, direction, localPath, remotePath),
     search: (connId: string, basePath: string, pattern: string, recursive: boolean) =>
       ipcRenderer.invoke('sftp:search', connId, basePath, pattern, recursive),
+    computeRemoteChecksum: (connId: string, remotePath: string, algorithm: string) =>
+      ipcRenderer.invoke('sftp:computeRemoteChecksum', connId, remotePath, algorithm),
   },
 
   // ── FTP ──────────────────────────────────────────────────────
@@ -126,6 +128,9 @@ const api = {
     saveRemoteFile: (protocol: string, connId: string, remotePath: string, content: string) =>
       ipcRenderer.invoke('app:saveRemoteFile', protocol, connId, remotePath, content),
     exportLogs: (content: string) => ipcRenderer.invoke('app:exportLogs', content),
+    checkForUpdates: () => ipcRenderer.invoke('app:checkForUpdates'),
+    computeChecksum: (filePath: string, algorithm: string) =>
+      ipcRenderer.invoke('app:computeChecksum', filePath, algorithm),
   },
 };
 

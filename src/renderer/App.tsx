@@ -11,6 +11,11 @@ import type { SessionTab } from './components/TabBar';
 
 type BottomTab = 'transfers' | 'log';
 
+interface UpdateInfo {
+  latestVersion: string;
+  downloadUrl: string;
+}
+
 let tabIdCounter = 0;
 function nextTabId(): string {
   tabIdCounter += 1;
@@ -29,6 +34,31 @@ export default function App() {
   const connectionId = activeTab?.connectionId ?? null;
   const host = activeTab?.name ?? null;
   const remotePath = activeTab?.remotePath ?? null;
+
+  // ── Auto-update ─────────────────────────────────────────────
+  const [updateInfo, setUpdateInfo] = useState<UpdateInfo | null>(null);
+
+  useEffect(() => {
+    const timer = setTimeout(() => {
+      if (typeof window !== 'undefined' && window.bridgefile) {
+        window.bridgefile.app
+          .checkForUpdates()
+          .then((result: { hasUpdate: boolean; latestVersion: string; downloadUrl: string }) => {
+            if (result.hasUpdate) {
+              setUpdateInfo({
+                latestVersion: result.latestVersion,
+                downloadUrl: result.downloadUrl,
+              });
+            }
+          })
+          .catch(() => {
+            // Silently ignore update check failures
+          });
+      }
+    }, 5000);
+
+    return () => clearTimeout(timer);
+  }, []);
 
   // ── Synchronized browsing ───────────────────────────────────
   const [syncBrowsing, setSyncBrowsing] = useState(false);
@@ -251,6 +281,32 @@ export default function App() {
           : 'bg-[#0a0a0f] text-[#e4e4e7]'
       }`}
     >
+      {/* Update banner */}
+      {updateInfo && (
+        <div className="flex items-center justify-center gap-2 px-3 py-1.5 bg-[#3b82f6]/10 border-b border-[#3b82f6]/20 text-xs text-[#93c5fd]">
+          <span>
+            BridgeFile v{updateInfo.latestVersion} available
+          </span>
+          <span className="text-[#3b82f6]/40">—</span>
+          <a
+            href={updateInfo.downloadUrl}
+            target="_blank"
+            rel="noopener noreferrer"
+            className="text-[#3b82f6] hover:text-[#60a5fa] underline underline-offset-2 transition-colors"
+          >
+            Download
+          </a>
+          <button
+            onClick={() => setUpdateInfo(null)}
+            className="ml-auto p-0.5 rounded text-[#71717a] hover:text-[#e4e4e7] transition-colors"
+          >
+            <svg width="10" height="10" viewBox="0 0 24 24" fill="none">
+              <path d="M18 6L6 18M6 6l12 12" stroke="currentColor" strokeWidth="2" strokeLinecap="round" />
+            </svg>
+          </button>
+        </div>
+      )}
+
       {/* Top: Connection bar */}
       <ConnectionBar
         isConnected={isConnected}

@@ -19,6 +19,7 @@
     "src/main/main.ts",
     "src/main/ipc-handlers.ts",
     "src/main/store.ts",
+    "src/main/auto-updater.ts",
     "src/main/protocols/**/*.ts",
     "src/shared/**/*.ts"
   ],
