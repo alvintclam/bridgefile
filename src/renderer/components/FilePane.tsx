@@ -12,6 +12,32 @@ interface FilePaneProps {
 type SortField = 'name' | 'size' | 'modified';
 type SortDirection = 'asc' | 'desc';
 
+// ── Overwrite Dialog types ─────────────────────────────────────
+
+type OverwriteAction = 'overwrite' | 'skip' | 'rename';
+
+interface OverwriteDialogState {
+  visible: boolean;
+  fileName: string;
+  action: OverwriteAction;
+  applyToAll: boolean;
+  resolve: ((result: { action: OverwriteAction; applyToAll: boolean }) => void) | null;
+}
+
+// ── Multi-file progress types ──────────────────────────────────
+
+interface MultiFileProgress {
+  visible: boolean;
+  direction: 'upload' | 'download';
+  current: number;
+  total: number;
+  currentFile: string;
+}
+
+// ── Drag & Drop data key ───────────────────────────────────────
+
+const DRAG_DATA_KEY = 'application/x-bridgefile-transfer';
+
 export default function FilePane({ side, label, protocol, connectionId }: FilePaneProps) {
   const params: FileOperationsParams = { side, protocol, connectionId };
   const ops = useFileOperations(params);
@@ -37,11 +63,31 @@ export default function FilePane({ side, label, protocol, connectionId }: FilePa
   const [newFolderName, setNewFolderName] = useState<string | null>(null);
   const [renamingFile, setRenamingFile] = useState<string | null>(null);
   const [renameValue, setRenameValue] = useState('');
+  const [isDragOver, setIsDragOver] = useState(false);
+
+  // Overwrite dialog state
+  const [overwriteDialog, setOverwriteDialog] = useState<OverwriteDialogState>({
+    visible: false,
+    fileName: '',
+    action: 'overwrite',
+    applyToAll: false,
+    resolve: null,
+  });
+
+  // Multi-file progress state
+  const [multiProgress, setMultiProgress] = useState<MultiFileProgress>({
+    visible: false,
+    direction: 'upload',
+    current: 0,
+    total: 0,
+    currentFile: '',
+  });
 
   const listRef = useRef<HTMLDivElement>(null);
   const pathInputRef = useRef<HTMLInputElement>(null);
   const newFolderRef = useRef<HTMLInputElement>(null);
   const renameRef = useRef<HTMLInputElement>(null);
+  const filterInputRef = useRef<HTMLInputElement>(null);
 
   useEffect(() => {
     setPathInput(currentPath);
@@ -193,6 +239,282 @@ export default function FilePane({ side, label, protocol, connectionId }: FilePa
     setRenameValue('');
   };
 
+  // ── Overwrite dialog helper ──────────────────────────────────
+
+  const showOverwriteDialog = useCallback((fileName: string): Promise<{ action: OverwriteAction; applyToAll: boolean }> => {
+    return new Promise((resolve) => {
+      setOverwriteDialog({
+        visible: true,
+        fileName,
+        action: 'overwrite',
+        applyToAll: false,
+        resolve,
+      });
+    });
+  }, []);
+
+  const handleOverwriteResponse = useCallback((action: OverwriteAction, applyToAll: boolean) => {
+    if (overwriteDialog.resolve) {
+      overwriteDialog.resolve({ action, applyToAll });
+    }
+    setOverwriteDialog({
+      visible: false,
+      fileName: '',
+      action: 'overwrite',
+      applyToAll: false,
+      resolve: null,
+    });
+  }, [overwriteDialog.resolve]);
+
+  // ── Drag from desktop / Finder ───────────────────────────────
+
+  const handleDragOver = useCallback((e: React.DragEvent) => {
+    e.preventDefault();
+    e.stopPropagation();
+
+    // Check if this is an external file drop or a pane-to-pane transfer
+    if (e.dataTransfer.types.includes('Files') || e.dataTransfer.types.includes(DRAG_DATA_KEY)) {
+      e.dataTransfer.dropEffect = 'copy';
+      setIsDragOver(true);
+    }
+  }, []);
+
+  const handleDragLeave = useCallback((e: React.DragEvent) => {
+    e.preventDefault();
+    e.stopPropagation();
+    // Only reset if we're actually leaving the container
+    const rect = listRef.current?.getBoundingClientRect();
+    if (rect) {
+      const { clientX, clientY } = e;
+      if (
+        clientX < rect.left ||
+        clientX > rect.right ||
+        clientY < rect.top ||
+        clientY > rect.bottom
+      ) {
+        setIsDragOver(false);
+      }
+    }
+  }, []);
+
+  const handleDrop = useCallback((e: React.DragEvent) => {
+    e.preventDefault();
+    e.stopPropagation();
+    setIsDragOver(false);
+
+    // Handle pane-to-pane transfer
+    const transferData = e.dataTransfer.getData(DRAG_DATA_KEY);
+    if (transferData) {
+      try {
+        const data = JSON.parse(transferData) as {
+          sourceSide: 'local' | 'remote';
+          sourcePath: string;
+          files: { name: string; isDirectory: boolean }[];
+        };
+
+        // Only accept drops from the opposite pane
+        if (data.sourceSide !== side) {
+          // In a real implementation, this would trigger upload/download
+          // via the parent component. For now, log the intent.
+          console.log(`[transfer] ${data.sourceSide} -> ${side}`, data.files.map(f => f.name));
+        }
+      } catch {
+        // Invalid transfer data
+      }
+      return;
+    }
+
+    // Handle external file drops (from desktop/Finder)
+    const droppedFiles = e.dataTransfer.files;
+    if (droppedFiles.length > 0) {
+      const fileNames: string[] = [];
+      for (let i = 0; i < droppedFiles.length; i++) {
+        const file = droppedFiles[i];
+        fileNames.push(file.name);
+      }
+
+      // Show multi-file progress
+      if (fileNames.length > 1) {
+        setMultiProgress({
+          visible: true,
+          direction: 'upload',
+          current: 0,
+          total: fileNames.length,
+          currentFile: fileNames[0],
+        });
+
+        // Simulate progress for mock mode
+        let idx = 0;
+        const interval = setInterval(() => {
+          idx++;
+          if (idx >= fileNames.length) {
+            clearInterval(interval);
+            setMultiProgress(prev => ({ ...prev, visible: false }));
+            return;
+          }
+          setMultiProgress(prev => ({
+            ...prev,
+            current: idx,
+            currentFile: fileNames[idx],
+          }));
+        }, 500);
+      }
+
+      console.log(`[drop] ${fileNames.length} file(s) dropped onto ${side} pane at ${currentPath}`, fileNames);
+    }
+  }, [side, currentPath]);
+
+  // ── Drag between panes (row draggable) ───────────────────────
+
+  const handleRowDragStart = useCallback((e: React.DragEvent, file: FileEntry) => {
+    // If file is not in selected set, select only this file
+    const selectedFiles = selected.has(file.name)
+      ? sortedFiles.filter(f => selected.has(f.name))
+      : [file];
+
+    const transferPayload = {
+      sourceSide: side,
+      sourcePath: currentPath,
+      files: selectedFiles.map(f => ({
+        name: f.name,
+        isDirectory: f.isDirectory,
+      })),
+    };
+
+    e.dataTransfer.setData(DRAG_DATA_KEY, JSON.stringify(transferPayload));
+    e.dataTransfer.effectAllowed = 'copy';
+
+    // Set a drag image label
+    const dragLabel = document.createElement('div');
+    dragLabel.textContent = selectedFiles.length > 1
+      ? `${selectedFiles.length} items`
+      : file.name;
+    dragLabel.style.cssText = 'position:absolute;top:-9999px;padding:4px 8px;background:#3b82f6;color:#fff;border-radius:4px;font-size:12px;white-space:nowrap;';
+    document.body.appendChild(dragLabel);
+    e.dataTransfer.setDragImage(dragLabel, 0, 0);
+    requestAnimationFrame(() => document.body.removeChild(dragLabel));
+  }, [side, currentPath, selected, sortedFiles]);
+
+  // ── Keyboard shortcuts ───────────────────────────────────────
+
+  useEffect(() => {
+    const container = listRef.current?.closest('.file-pane-root') as HTMLElement | null;
+    if (!container) return;
+
+    const handleKeyDown = (e: KeyboardEvent) => {
+      // Don't intercept if an input/textarea is focused (except our own)
+      const target = e.target as HTMLElement;
+      if (
+        target.tagName === 'INPUT' ||
+        target.tagName === 'TEXTAREA' ||
+        target.isContentEditable
+      ) {
+        return;
+      }
+
+      const isMod = e.ctrlKey || e.metaKey;
+
+      // F2: rename selected file
+      if (e.key === 'F2' && selected.size === 1) {
+        e.preventDefault();
+        const fileName = Array.from(selected)[0];
+        setRenamingFile(fileName);
+        setRenameValue(fileName);
+        return;
+      }
+
+      // Delete or Backspace: delete selected files
+      if ((e.key === 'Delete' || (e.key === 'Backspace' && selected.size > 0)) && !isMod) {
+        e.preventDefault();
+        const toDelete = sortedFiles.filter(f => selected.has(f.name));
+        if (toDelete.length > 0) {
+          deleteFiles(toDelete);
+          setSelected(new Set());
+        }
+        return;
+      }
+
+      // Backspace with nothing selected: go to parent directory
+      if (e.key === 'Backspace' && selected.size === 0 && !isMod) {
+        e.preventDefault();
+        handleGoUp();
+        return;
+      }
+
+      // F5: refresh
+      if (e.key === 'F5') {
+        e.preventDefault();
+        refresh();
+        return;
+      }
+
+      // Ctrl/Cmd+A: select all
+      if (isMod && e.key === 'a') {
+        e.preventDefault();
+        setSelected(new Set(sortedFiles.map(f => f.name)));
+        return;
+      }
+
+      // Ctrl/Cmd+L: focus path input
+      if (isMod && e.key === 'l') {
+        e.preventDefault();
+        setEditingPath(true);
+        return;
+      }
+
+      // Enter: open selected folder / download selected file
+      if (e.key === 'Enter' && selected.size > 0) {
+        e.preventDefault();
+        const selectedFile = sortedFiles.find(f => selected.has(f.name));
+        if (selectedFile) {
+          if (selectedFile.isDirectory) {
+            handleDoubleClick(selectedFile);
+          } else {
+            // For files, trigger download (in context of this pane)
+            console.log(`[enter] Download/open: ${selectedFile.name}`);
+          }
+        }
+        return;
+      }
+
+      // Arrow keys for navigation through file list
+      if (e.key === 'ArrowDown' || e.key === 'ArrowUp') {
+        e.preventDefault();
+        if (sortedFiles.length === 0) return;
+
+        const names = sortedFiles.map(f => f.name);
+        const currentSelected = Array.from(selected);
+        let currentIndex = -1;
+
+        if (currentSelected.length > 0) {
+          currentIndex = names.indexOf(currentSelected[currentSelected.length - 1]);
+        }
+
+        let nextIndex: number;
+        if (e.key === 'ArrowDown') {
+          nextIndex = currentIndex < names.length - 1 ? currentIndex + 1 : currentIndex;
+        } else {
+          nextIndex = currentIndex > 0 ? currentIndex - 1 : 0;
+        }
+
+        if (e.shiftKey) {
+          setSelected(prev => {
+            const next = new Set(prev);
+            next.add(names[nextIndex]);
+            return next;
+          });
+        } else {
+          setSelected(new Set([names[nextIndex]]));
+        }
+        setLastSelected(names[nextIndex]);
+        return;
+      }
+    };
+
+    container.addEventListener('keydown', handleKeyDown);
+    return () => container.removeEventListener('keydown', handleKeyDown);
+  }, [selected, sortedFiles, currentPath, deleteFiles, refresh, handleGoUp]);
+
   const breadcrumbs = currentPath === '/'
     ? ['/']
     : ['/', ...currentPath.split('/').filter(Boolean)];
@@ -207,7 +529,10 @@ export default function FilePane({ side, label, protocol, connectionId }: FilePa
   };
 
   return (
-    <div className="flex flex-col h-full bg-[#0a0a0f] min-w-0">
+    <div
+      className="file-pane-root flex flex-col h-full bg-[#0a0a0f] min-w-0"
+      tabIndex={0}
+    >
       {/* Header: label + filter */}
       <div className="flex items-center gap-2 px-2 py-1.5 border-b border-[#1e1e2e] bg-[#12121a]">
         <span className="text-[11px] uppercase tracking-wider text-[#71717a] font-medium shrink-0">
@@ -215,6 +540,7 @@ export default function FilePane({ side, label, protocol, connectionId }: FilePa
         </span>
         <div className="flex-1 relative">
           <input
+            ref={filterInputRef}
             type="text"
             value={filter}
             onChange={e => setFilter(e.target.value)}
@@ -340,9 +666,43 @@ export default function FilePane({ side, label, protocol, connectionId }: FilePa
       {/* File list */}
       <div
         ref={listRef}
-        className="flex-1 overflow-y-auto overflow-x-hidden relative"
+        className={`flex-1 overflow-y-auto overflow-x-hidden relative ${
+          isDragOver ? 'bg-[#3b82f6]/5' : ''
+        }`}
         onContextMenu={e => handleContextMenu(e)}
+        onDragOver={handleDragOver}
+        onDragLeave={handleDragLeave}
+        onDrop={handleDrop}
       >
+        {/* Drop overlay */}
+        {isDragOver && (
+          <div className="absolute inset-0 z-40 flex items-center justify-center pointer-events-none">
+            <div className="flex flex-col items-center gap-2 px-6 py-4 rounded-lg border-2 border-dashed border-[#3b82f6] bg-[#3b82f6]/10">
+              <svg width="32" height="32" viewBox="0 0 24 24" fill="none" className="text-[#3b82f6]">
+                <path d="M21 15v4a2 2 0 01-2 2H5a2 2 0 01-2-2v-4" stroke="currentColor" strokeWidth="1.5" strokeLinecap="round" strokeLinejoin="round" />
+                <polyline points="17,8 12,3 7,8" stroke="currentColor" strokeWidth="1.5" strokeLinecap="round" strokeLinejoin="round" />
+                <line x1="12" y1="3" x2="12" y2="15" stroke="currentColor" strokeWidth="1.5" strokeLinecap="round" />
+              </svg>
+              <span className="text-xs text-[#3b82f6] font-medium">Drop files here to upload</span>
+            </div>
+          </div>
+        )}
+
+        {/* Multi-file progress banner */}
+        {multiProgress.visible && (
+          <div className="sticky top-0 z-30 flex items-center gap-2 px-3 py-2 bg-[#3b82f6]/10 border-b border-[#3b82f6]/20 text-xs text-[#3b82f6]">
+            <svg className="animate-spin h-3.5 w-3.5 shrink-0" viewBox="0 0 24 24" fill="none">
+              <circle cx="12" cy="12" r="10" stroke="currentColor" strokeWidth="2" className="opacity-25" />
+              <path d="M4 12a8 8 0 018-8" stroke="currentColor" strokeWidth="2" strokeLinecap="round" className="opacity-75" />
+            </svg>
+            <span>
+              {multiProgress.direction === 'upload' ? 'Uploading' : 'Downloading'}{' '}
+              {multiProgress.current + 1} of {multiProgress.total} files...
+            </span>
+            <span className="text-[#71717a] truncate ml-1">{multiProgress.currentFile}</span>
+          </div>
+        )}
+
         {loading ? (
           <div className="flex items-center justify-center h-full">
             <div className="flex items-center gap-2 text-[#71717a] text-xs">
@@ -386,6 +746,8 @@ export default function FilePane({ side, label, protocol, connectionId }: FilePa
             {sortedFiles.map(file => (
               <div
                 key={file.name}
+                draggable
+                onDragStart={e => handleRowDragStart(e, file)}
                 className={`flex items-center px-2 py-[3px] text-xs cursor-pointer transition-colors ${
                   selected.has(file.name)
                     ? 'bg-[#3b82f6]/15 text-[#e4e4e7]'
@@ -539,6 +901,14 @@ export default function FilePane({ side, label, protocol, connectionId }: FilePa
         )}
       </div>
 
+      {/* Overwrite dialog */}
+      {overwriteDialog.visible && (
+        <OverwriteDialog
+          fileName={overwriteDialog.fileName}
+          onResponse={handleOverwriteResponse}
+        />
+      )}
+
       {/* Status bar */}
       <div className="flex items-center justify-between px-2 py-1 text-[11px] text-[#71717a] border-t border-[#1e1e2e] bg-[#12121a]">
         <span>
@@ -550,6 +920,66 @@ export default function FilePane({ side, label, protocol, connectionId }: FilePa
     </div>
   );
 }
+
+// ── Overwrite Dialog Component ─────────────────────────────────
+
+function OverwriteDialog({
+  fileName,
+  onResponse,
+}: {
+  fileName: string;
+  onResponse: (action: OverwriteAction, applyToAll: boolean) => void;
+}) {
+  const [applyToAll, setApplyToAll] = useState(false);
+
+  return (
+    <div className="absolute inset-0 z-50 flex items-center justify-center bg-black/50">
+      <div className="bg-[#12121a] border border-[#1e1e2e] rounded-lg shadow-xl p-4 max-w-sm w-full mx-4">
+        <h3 className="text-sm font-medium text-[#e4e4e7] mb-2">File Already Exists</h3>
+        <p className="text-xs text-[#a1a1aa] mb-4">
+          The file <span className="text-[#e4e4e7] font-mono">{fileName}</span> already exists
+          in the destination. What would you like to do?
+        </p>
+
+        <div className="flex flex-col gap-2 mb-4">
+          <button
+            onClick={() => onResponse('overwrite', applyToAll)}
+            className="w-full px-3 py-2 text-xs text-left rounded bg-[#1a1a26] hover:bg-[#3b82f6]/15 text-[#e4e4e7] transition-colors"
+          >
+            Overwrite
+            <span className="block text-[10px] text-[#71717a] mt-0.5">Replace the existing file</span>
+          </button>
+          <button
+            onClick={() => onResponse('skip', applyToAll)}
+            className="w-full px-3 py-2 text-xs text-left rounded bg-[#1a1a26] hover:bg-[#3b82f6]/15 text-[#e4e4e7] transition-colors"
+          >
+            Skip
+            <span className="block text-[10px] text-[#71717a] mt-0.5">Keep the existing file</span>
+          </button>
+          <button
+            onClick={() => onResponse('rename', applyToAll)}
+            className="w-full px-3 py-2 text-xs text-left rounded bg-[#1a1a26] hover:bg-[#3b82f6]/15 text-[#e4e4e7] transition-colors"
+          >
+            Rename (auto)
+            <span className="block text-[10px] text-[#71717a] mt-0.5">Save with a new name (e.g. file_1.txt)</span>
+          </button>
+        </div>
+
+        <label className="flex items-center gap-2 text-xs text-[#a1a1aa] cursor-pointer">
+          <input
+            type="checkbox"
+            checked={applyToAll}
+            onChange={e => setApplyToAll(e.target.checked)}
+            className="rounded border-[#1e1e2e] bg-[#0a0a0f] text-[#3b82f6] focus:ring-[#3b82f6] focus:ring-offset-0"
+          />
+          Apply to all remaining files
+        </label>
+      </div>
+    </div>
+  );
+}
+
+// ── Context Menu Component ─────────────────────────────────────
 
 function ContextMenu({
   x,
@@ -595,11 +1025,13 @@ function ContextMenu({
 
   const MenuItem = ({
     label,
+    shortcut,
     onClick,
     danger,
     disabled,
   }: {
     label: string;
+    shortcut?: string;
     onClick: () => void;
     danger?: boolean;
     disabled?: boolean;
@@ -610,7 +1042,7 @@ function ContextMenu({
         if (!disabled) onClick();
       }}
       disabled={disabled}
-      className={`w-full text-left px-3 py-1.5 text-xs transition-colors ${
+      className={`w-full text-left px-3 py-1.5 text-xs transition-colors flex items-center justify-between ${
         disabled
           ? 'text-[#4a4a5a] cursor-default'
           : danger
@@ -618,7 +1050,10 @@ function ContextMenu({
             : 'text-[#a1a1aa] hover:bg-[#1a1a26] hover:text-[#e4e4e7]'
       }`}
     >
-      {label}
+      <span>{label}</span>
+      {shortcut && (
+        <span className="text-[10px] text-[#4a4a5a] ml-4">{shortcut}</span>
+      )}
     </button>
   );
 
@@ -627,30 +1062,33 @@ function ContextMenu({
   return (
     <div
       ref={menuRef}
-      className="fixed z-50 min-w-[180px] py-1 bg-[#12121a] border border-[#1e1e2e] rounded-lg shadow-xl"
+      className="fixed z-50 min-w-[200px] py-1 bg-[#12121a] border border-[#1e1e2e] rounded-lg shadow-xl"
       style={{ left: pos.x, top: pos.y }}
       onClick={e => e.stopPropagation()}
     >
       {file && (
         <>
           {file.isDirectory ? (
-            <MenuItem label="Open" onClick={() => onOpen(file)} />
+            <MenuItem label="Open" shortcut="Enter" onClick={() => onOpen(file)} />
           ) : null}
           <MenuItem
             label={side === 'local' ? 'Upload' : 'Download'}
             onClick={onDownload}
           />
-          <MenuItem label="Rename" onClick={() => onRename(file)} />
+          <MenuItem label="Rename" shortcut="F2" onClick={() => onRename(file)} />
           <MenuItem label="Copy Path" onClick={onCopyPath} />
           <Divider />
         </>
       )}
       <MenuItem label="New Folder" onClick={onNewFolder} />
-      <MenuItem label="Refresh" onClick={onRefresh} />
+      <MenuItem label="Refresh" shortcut="F5" onClick={onRefresh} />
+      <MenuItem label="Select All" shortcut={navigator.platform?.includes('Mac') ? '\u2318A' : 'Ctrl+A'} onClick={() => {
+        // Handled by keyboard shortcuts
+      }} disabled />
       {file && (
         <>
           <Divider />
-          <MenuItem label="Delete" onClick={onDelete} danger />
+          <MenuItem label="Delete" shortcut="Del" onClick={onDelete} danger />
         </>
       )}
     </div>

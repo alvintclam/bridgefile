@@ -1,5 +1,6 @@
 import { Client as FTPClient, FileInfo } from 'basic-ftp';
 import * as path from 'path';
+import * as fs from 'fs';
 import * as crypto from 'crypto';
 import type { FTPConfig, FileEntry } from '../../shared/types';
 
@@ -187,6 +188,110 @@ export async function del(connId: string, targetPath: string): Promise<void> {
   }
 
   await client.remove(targetPath);
+}
+
+// ── Recursive directory operations ─────────────────────────────
+
+export async function uploadDir(
+  connId: string,
+  localDir: string,
+  remoteDir: string,
+  onProgress?: (file: string, fileIndex: number, totalFiles: number) => void,
+): Promise<void> {
+  const { client } = getConn(connId);
+
+  if (onProgress) {
+    // Count all files first
+    const allFiles: string[] = [];
+    const countFiles = (dir: string) => {
+      const items = fs.readdirSync(dir, { withFileTypes: true });
+      for (const item of items) {
+        const fullPath = path.join(dir, item.name);
+        if (item.isDirectory()) {
+          countFiles(fullPath);
+        } else {
+          allFiles.push(fullPath);
+        }
+      }
+    };
+    countFiles(localDir);
+
+    let fileIndex = 0;
+    client.trackProgress((info) => {
+      onProgress(info.name, fileIndex + 1, allFiles.length);
+    });
+
+    try {
+      await client.uploadFromDir(localDir, remoteDir);
+    } finally {
+      client.trackProgress();
+    }
+  } else {
+    await client.uploadFromDir(localDir, remoteDir);
+  }
+}
+
+export async function downloadDir(
+  connId: string,
+  remoteDir: string,
+  localDir: string,
+  onProgress?: (file: string, fileIndex: number, totalFiles: number) => void,
+): Promise<void> {
+  const { client } = getConn(connId);
+
+  // Ensure local directory exists
+  fs.mkdirSync(localDir, { recursive: true });
+
+  if (onProgress) {
+    // Count remote files first
+    const allFiles: string[] = [];
+    const countFiles = async (dir: string) => {
+      const entries = await client.list(dir);
+      for (const entry of entries) {
+        if (entry.name === '.' || entry.name === '..') continue;
+        const fullPath = path.posix.join(dir, entry.name);
+        if (entry.isDirectory) {
+          await countFiles(fullPath);
+        } else {
+          allFiles.push(fullPath);
+        }
+      }
+    };
+    await countFiles(remoteDir);
+
+    let fileIndex = 0;
+    client.trackProgress((info) => {
+      onProgress(info.name, fileIndex + 1, allFiles.length);
+    });
+
+    try {
+      await client.downloadToDir(localDir, remoteDir);
+    } finally {
+      client.trackProgress();
+    }
+  } else {
+    await client.downloadToDir(localDir, remoteDir);
+  }
+}
+
+export async function deleteDir(connId: string, dirPath: string): Promise<void> {
+  const { client } = getConn(connId);
+
+  // Recursively list and delete all contents
+  const entries = await client.list(dirPath);
+
+  for (const entry of entries) {
+    if (entry.name === '.' || entry.name === '..') continue;
+    const fullPath = path.posix.join(dirPath, entry.name);
+    if (entry.isDirectory) {
+      await deleteDir(connId, fullPath);
+    } else {
+      await client.remove(fullPath);
+    }
+  }
+
+  // Remove the now-empty directory
+  await client.removeDir(dirPath);
 }
 
 // ── Helpers ────────────────────────────────────────────────────

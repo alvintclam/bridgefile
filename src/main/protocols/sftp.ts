@@ -267,6 +267,132 @@ export async function stat(connId: string, targetPath: string): Promise<FileEntr
   });
 }
 
+// ── Recursive directory operations ─────────────────────────────
+
+export async function uploadDir(
+  connId: string,
+  localDir: string,
+  remoteDir: string,
+  onProgress?: (file: string, fileIndex: number, totalFiles: number) => void,
+): Promise<void> {
+  const { sftp } = getConn(connId);
+
+  // Ensure remote directory exists
+  await new Promise<void>((resolve, reject) => {
+    sftp.mkdir(remoteDir, (err) => {
+      if (err && (err as any).code !== 4) return reject(err); // code 4 = already exists
+      resolve();
+    });
+  });
+
+  const entries = fs.readdirSync(localDir, { withFileTypes: true });
+  const allFiles: { local: string; remote: string }[] = [];
+
+  // Gather all files recursively
+  const gather = (localBase: string, remoteBase: string) => {
+    const items = fs.readdirSync(localBase, { withFileTypes: true });
+    for (const item of items) {
+      const localPath = path.join(localBase, item.name);
+      const remotePath = path.posix.join(remoteBase, item.name);
+      if (item.isDirectory()) {
+        gather(localPath, remotePath);
+      } else {
+        allFiles.push({ local: localPath, remote: remotePath });
+      }
+    }
+  };
+  gather(localDir, remoteDir);
+
+  // Create all remote directories first
+  const createDirs = async (localBase: string, remoteBase: string) => {
+    const items = fs.readdirSync(localBase, { withFileTypes: true });
+    for (const item of items) {
+      if (item.isDirectory()) {
+        const remotePath = path.posix.join(remoteBase, item.name);
+        await new Promise<void>((resolve, reject) => {
+          sftp.mkdir(remotePath, (err) => {
+            if (err && (err as any).code !== 4) return reject(err);
+            resolve();
+          });
+        });
+        await createDirs(path.join(localBase, item.name), remotePath);
+      }
+    }
+  };
+  await createDirs(localDir, remoteDir);
+
+  // Upload all files
+  for (let i = 0; i < allFiles.length; i++) {
+    const f = allFiles[i];
+    onProgress?.(f.local, i + 1, allFiles.length);
+    await upload(connId, f.local, f.remote);
+  }
+}
+
+export async function downloadDir(
+  connId: string,
+  remoteDir: string,
+  localDir: string,
+  onProgress?: (file: string, fileIndex: number, totalFiles: number) => void,
+): Promise<void> {
+  // Ensure local directory exists
+  fs.mkdirSync(localDir, { recursive: true });
+
+  const entries = await list(connId, remoteDir);
+  const allFiles: { remote: string; local: string }[] = [];
+
+  // Gather all files recursively
+  const gather = async (remotePath: string, localPath: string) => {
+    const items = await list(connId, remotePath);
+    for (const item of items) {
+      const rPath = path.posix.join(remotePath, item.name);
+      const lPath = path.join(localPath, item.name);
+      if (item.isDirectory) {
+        fs.mkdirSync(lPath, { recursive: true });
+        await gather(rPath, lPath);
+      } else {
+        allFiles.push({ remote: rPath, local: lPath });
+      }
+    }
+  };
+  await gather(remoteDir, localDir);
+
+  // Download all files
+  for (let i = 0; i < allFiles.length; i++) {
+    const f = allFiles[i];
+    onProgress?.(f.remote, i + 1, allFiles.length);
+    await download(connId, f.remote, f.local);
+  }
+}
+
+export async function deleteDir(connId: string, dirPath: string): Promise<void> {
+  const { sftp } = getConn(connId);
+
+  const entries = await list(connId, dirPath);
+
+  for (const entry of entries) {
+    const fullPath = path.posix.join(dirPath, entry.name);
+    if (entry.isDirectory) {
+      await deleteDir(connId, fullPath);
+    } else {
+      await new Promise<void>((resolve, reject) => {
+        sftp.unlink(fullPath, (err) => {
+          if (err) return reject(new Error(`unlink failed: ${err.message}`));
+          resolve();
+        });
+      });
+    }
+  }
+
+  // Remove the now-empty directory
+  await new Promise<void>((resolve, reject) => {
+    sftp.rmdir(dirPath, (err) => {
+      if (err) return reject(new Error(`rmdir failed: ${err.message}`));
+      resolve();
+    });
+  });
+}
+
 // ── Helpers ────────────────────────────────────────────────────
 
 function formatPermissions(mode: number): string {

@@ -24,6 +24,12 @@ const api = {
     delete: (connId: string, path: string) =>
       ipcRenderer.invoke('sftp:delete', connId, path),
     stat: (connId: string, path: string) => ipcRenderer.invoke('sftp:stat', connId, path),
+    uploadDir: (connId: string, localDir: string, remoteDir: string) =>
+      ipcRenderer.invoke('sftp:uploadDir', connId, localDir, remoteDir),
+    downloadDir: (connId: string, remoteDir: string, localDir: string) =>
+      ipcRenderer.invoke('sftp:downloadDir', connId, remoteDir, localDir),
+    deleteDir: (connId: string, dirPath: string) =>
+      ipcRenderer.invoke('sftp:deleteDir', connId, dirPath),
   },
 
   // ── FTP ──────────────────────────────────────────────────────
@@ -40,6 +46,12 @@ const api = {
       ipcRenderer.invoke('ftp:rename', connId, oldPath, newPath),
     delete: (connId: string, path: string) =>
       ipcRenderer.invoke('ftp:delete', connId, path),
+    uploadDir: (connId: string, localDir: string, remoteDir: string) =>
+      ipcRenderer.invoke('ftp:uploadDir', connId, localDir, remoteDir),
+    downloadDir: (connId: string, remoteDir: string, localDir: string) =>
+      ipcRenderer.invoke('ftp:downloadDir', connId, remoteDir, localDir),
+    deleteDir: (connId: string, dirPath: string) =>
+      ipcRenderer.invoke('ftp:deleteDir', connId, dirPath),
   },
 
   // ── S3 ─────────────────────────────────────────────────────
@@ -55,6 +67,12 @@ const api = {
     rename: (connId: string, oldKey: string, newKey: string) =>
       ipcRenderer.invoke('s3:rename', connId, oldKey, newKey),
     delete: (connId: string, key: string) => ipcRenderer.invoke('s3:delete', connId, key),
+    uploadDir: (connId: string, localDir: string, remoteDir: string) =>
+      ipcRenderer.invoke('s3:uploadDir', connId, localDir, remoteDir),
+    downloadDir: (connId: string, remoteDir: string, localDir: string) =>
+      ipcRenderer.invoke('s3:downloadDir', connId, remoteDir, localDir),
+    deleteDir: (connId: string, dirPath: string) =>
+      ipcRenderer.invoke('s3:deleteDir', connId, dirPath),
   },
 
   // ── Transfer queue ─────────────────────────────────────────

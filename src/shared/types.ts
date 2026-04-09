@@ -114,6 +114,9 @@ export interface IPCChannels {
   'sftp:rename': (connId: string, oldPath: string, newPath: string) => void;
   'sftp:delete': (connId: string, path: string) => void;
   'sftp:stat': (connId: string, path: string) => FileEntry;
+  'sftp:uploadDir': (connId: string, localDir: string, remoteDir: string) => void;
+  'sftp:downloadDir': (connId: string, remoteDir: string, localDir: string) => void;
+  'sftp:deleteDir': (connId: string, dirPath: string) => void;
 
   // FTP
   'ftp:connect': (config: FTPConfig) => string;
@@ -124,6 +127,9 @@ export interface IPCChannels {
   'ftp:mkdir': (connId: string, path: string) => void;
   'ftp:rename': (connId: string, oldPath: string, newPath: string) => void;
   'ftp:delete': (connId: string, path: string) => void;
+  'ftp:uploadDir': (connId: string, localDir: string, remoteDir: string) => void;
+  'ftp:downloadDir': (connId: string, remoteDir: string, localDir: string) => void;
+  'ftp:deleteDir': (connId: string, dirPath: string) => void;
 
   // S3
   's3:connect': (config: S3Config) => string;
@@ -134,6 +140,9 @@ export interface IPCChannels {
   's3:mkdir': (connId: string, path: string) => void;
   's3:rename': (connId: string, oldKey: string, newKey: string) => void;
   's3:delete': (connId: string, key: string) => void;
+  's3:uploadDir': (connId: string, localDir: string, remoteDir: string) => void;
+  's3:downloadDir': (connId: string, remoteDir: string, localDir: string) => void;
+  's3:deleteDir': (connId: string, dirPath: string) => void;
 
   // Transfer queue
   'transfer:getQueue': () => TransferItem[];

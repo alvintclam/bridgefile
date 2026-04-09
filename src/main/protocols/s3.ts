@@ -367,6 +367,140 @@ export async function del(connId: string, targetPath: string): Promise<void> {
   }
 }
 
+// ── Recursive directory operations ─────────────────────────────
+
+export async function uploadDir(
+  connId: string,
+  localDir: string,
+  remoteDir: string,
+  onProgress?: (file: string, fileIndex: number, totalFiles: number) => void,
+): Promise<void> {
+  // Gather all local files recursively
+  const allFiles: { local: string; remote: string }[] = [];
+
+  const gather = (localBase: string, remoteBase: string) => {
+    const items = fs.readdirSync(localBase, { withFileTypes: true });
+    for (const item of items) {
+      const localPath = path.join(localBase, item.name);
+      const remotePath = remoteBase === '/' ? `/${item.name}` : `${remoteBase}/${item.name}`;
+      if (item.isDirectory()) {
+        gather(localPath, remotePath);
+      } else {
+        allFiles.push({ local: localPath, remote: remotePath });
+      }
+    }
+  };
+  gather(localDir, remoteDir);
+
+  // Upload each file (S3 doesn't need explicit mkdir)
+  for (let i = 0; i < allFiles.length; i++) {
+    const f = allFiles[i];
+    onProgress?.(f.local, i + 1, allFiles.length);
+    await upload(connId, f.local, f.remote);
+  }
+}
+
+export async function downloadDir(
+  connId: string,
+  remoteDir: string,
+  localDir: string,
+  onProgress?: (file: string, fileIndex: number, totalFiles: number) => void,
+): Promise<void> {
+  const conn = getConn(connId);
+
+  // List all objects under the prefix recursively
+  let prefix = resolveKey(conn, remoteDir);
+  if (prefix && !prefix.endsWith('/')) prefix += '/';
+
+  const allKeys: { key: string; virtualPath: string }[] = [];
+  let continuationToken: string | undefined;
+
+  do {
+    const resp = await conn.client.send(
+      new ListObjectsV2Command({
+        Bucket: conn.bucket,
+        Prefix: prefix,
+        ContinuationToken: continuationToken,
+        MaxKeys: 1000,
+      }),
+    );
+
+    for (const obj of resp.Contents ?? []) {
+      if (!obj.Key) continue;
+      // Skip directory markers
+      if (obj.Key.endsWith('/')) continue;
+
+      const virtualPath = '/' + stripRootPrefix(conn, obj.Key);
+      allKeys.push({ key: obj.Key, virtualPath });
+    }
+
+    continuationToken = resp.NextContinuationToken;
+  } while (continuationToken);
+
+  // Ensure local directory exists
+  fs.mkdirSync(localDir, { recursive: true });
+
+  // Download each file
+  for (let i = 0; i < allKeys.length; i++) {
+    const { virtualPath } = allKeys[i];
+    // Calculate relative path from remoteDir
+    const cleanRemoteDir = remoteDir.replace(/\/$/, '');
+    const relativePath = virtualPath.slice(cleanRemoteDir.length + 1);
+    const localPath = path.join(localDir, ...relativePath.split('/'));
+
+    // Ensure parent directory exists
+    fs.mkdirSync(path.dirname(localPath), { recursive: true });
+
+    onProgress?.(virtualPath, i + 1, allKeys.length);
+    await download(connId, virtualPath, localPath);
+  }
+}
+
+export async function deleteDir(connId: string, dirPath: string): Promise<void> {
+  const conn = getConn(connId);
+
+  let prefix = resolveKey(conn, dirPath);
+  if (prefix && !prefix.endsWith('/')) prefix += '/';
+
+  // List and delete all objects under this prefix
+  let continuationToken: string | undefined;
+
+  do {
+    const resp = await conn.client.send(
+      new ListObjectsV2Command({
+        Bucket: conn.bucket,
+        Prefix: prefix,
+        ContinuationToken: continuationToken,
+        MaxKeys: 1000,
+      }),
+    );
+
+    for (const obj of resp.Contents ?? []) {
+      if (!obj.Key) continue;
+      await conn.client.send(
+        new DeleteObjectCommand({
+          Bucket: conn.bucket,
+          Key: obj.Key,
+        }),
+      );
+    }
+
+    continuationToken = resp.NextContinuationToken;
+  } while (continuationToken);
+
+  // Also delete the directory marker itself
+  try {
+    await conn.client.send(
+      new DeleteObjectCommand({
+        Bucket: conn.bucket,
+        Key: prefix,
+      }),
+    );
+  } catch {
+    // Ignore if marker doesn't exist
+  }
+}
+
 // ── Helpers ────────────────────────────────────────────────────
 
 /**

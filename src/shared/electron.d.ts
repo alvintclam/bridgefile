@@ -26,6 +26,9 @@ export interface BridgeFileAPI {
     rename(connId: string, oldPath: string, newPath: string): Promise<void>;
     delete(connId: string, path: string): Promise<void>;
     stat(connId: string, path: string): Promise<FileEntry>;
+    uploadDir(connId: string, localDir: string, remoteDir: string): Promise<void>;
+    downloadDir(connId: string, remoteDir: string, localDir: string): Promise<void>;
+    deleteDir(connId: string, dirPath: string): Promise<void>;
   };
 
   ftp: {
@@ -37,6 +40,9 @@ export interface BridgeFileAPI {
     mkdir(connId: string, path: string): Promise<void>;
     rename(connId: string, oldPath: string, newPath: string): Promise<void>;
     delete(connId: string, path: string): Promise<void>;
+    uploadDir(connId: string, localDir: string, remoteDir: string): Promise<void>;
+    downloadDir(connId: string, remoteDir: string, localDir: string): Promise<void>;
+    deleteDir(connId: string, dirPath: string): Promise<void>;
   };
 
   s3: {
@@ -48,6 +54,9 @@ export interface BridgeFileAPI {
     mkdir(connId: string, path: string): Promise<void>;
     rename(connId: string, oldKey: string, newKey: string): Promise<void>;
     delete(connId: string, key: string): Promise<void>;
+    uploadDir(connId: string, localDir: string, remoteDir: string): Promise<void>;
+    downloadDir(connId: string, remoteDir: string, localDir: string): Promise<void>;
+    deleteDir(connId: string, dirPath: string): Promise<void>;
   };
 
   transfer: {

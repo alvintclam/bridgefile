@@ -159,6 +159,27 @@ export function registerIPCHandlers(): void {
     return sftpClient.stat(connId, targetPath);
   });
 
+  ipcMain.handle(
+    'sftp:uploadDir',
+    async (_event, connId: string, localDir: string, remoteDir: string) => {
+      return sftpClient.uploadDir(connId, localDir, remoteDir);
+    },
+  );
+
+  ipcMain.handle(
+    'sftp:downloadDir',
+    async (_event, connId: string, remoteDir: string, localDir: string) => {
+      return sftpClient.downloadDir(connId, remoteDir, localDir);
+    },
+  );
+
+  ipcMain.handle(
+    'sftp:deleteDir',
+    async (_event, connId: string, dirPath: string) => {
+      return sftpClient.deleteDir(connId, dirPath);
+    },
+  );
+
   // ── FTP ──────────────────────────────────────────────────────
 
   ipcMain.handle('ftp:connect', async (_event, config) => {
@@ -265,6 +286,27 @@ export function registerIPCHandlers(): void {
     return ftpClient.del(connId, targetPath);
   });
 
+  ipcMain.handle(
+    'ftp:uploadDir',
+    async (_event, connId: string, localDir: string, remoteDir: string) => {
+      return ftpClient.uploadDir(connId, localDir, remoteDir);
+    },
+  );
+
+  ipcMain.handle(
+    'ftp:downloadDir',
+    async (_event, connId: string, remoteDir: string, localDir: string) => {
+      return ftpClient.downloadDir(connId, remoteDir, localDir);
+    },
+  );
+
+  ipcMain.handle(
+    'ftp:deleteDir',
+    async (_event, connId: string, dirPath: string) => {
+      return ftpClient.deleteDir(connId, dirPath);
+    },
+  );
+
   // ── S3 ─────────────────────────────────────────────────────
 
   ipcMain.handle('s3:connect', async (_event, config) => {
@@ -370,6 +412,27 @@ export function registerIPCHandlers(): void {
   ipcMain.handle('s3:delete', async (_event, connId: string, key: string) => {
     return s3Client.del(connId, key);
   });
+
+  ipcMain.handle(
+    's3:uploadDir',
+    async (_event, connId: string, localDir: string, remoteDir: string) => {
+      return s3Client.uploadDir(connId, localDir, remoteDir);
+    },
+  );
+
+  ipcMain.handle(
+    's3:downloadDir',
+    async (_event, connId: string, remoteDir: string, localDir: string) => {
+      return s3Client.downloadDir(connId, remoteDir, localDir);
+    },
+  );
+
+  ipcMain.handle(
+    's3:deleteDir',
+    async (_event, connId: string, dirPath: string) => {
+      return s3Client.deleteDir(connId, dirPath);
+    },
+  );
 
   // ── Transfer queue ─────────────────────────────────────────
 
