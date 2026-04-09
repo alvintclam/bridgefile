@@ -38,6 +38,8 @@ const api = {
       localPath: string,
       remotePath: string,
     ) => ipcRenderer.invoke('sftp:resumeTransfer', connId, direction, localPath, remotePath),
+    search: (connId: string, basePath: string, pattern: string, recursive: boolean) =>
+      ipcRenderer.invoke('sftp:search', connId, basePath, pattern, recursive),
   },
 
   // ── FTP ──────────────────────────────────────────────────────
@@ -66,6 +68,8 @@ const api = {
       localPath: string,
       remotePath: string,
     ) => ipcRenderer.invoke('ftp:resumeTransfer', connId, direction, localPath, remotePath),
+    search: (connId: string, basePath: string, pattern: string, recursive: boolean) =>
+      ipcRenderer.invoke('ftp:search', connId, basePath, pattern, recursive),
   },
 
   // ── S3 ─────────────────────────────────────────────────────
@@ -87,6 +91,8 @@ const api = {
       ipcRenderer.invoke('s3:downloadDir', connId, remoteDir, localDir),
     deleteDir: (connId: string, dirPath: string) =>
       ipcRenderer.invoke('s3:deleteDir', connId, dirPath),
+    search: (connId: string, prefix: string, pattern: string) =>
+      ipcRenderer.invoke('s3:search', connId, prefix, pattern),
   },
 
   // ── Transfer queue ─────────────────────────────────────────
@@ -115,6 +121,11 @@ const api = {
   app: {
     getVersion: () => ipcRenderer.invoke('app:getVersion'),
     getPlatform: () => ipcRenderer.invoke('app:getPlatform'),
+    editRemoteFile: (protocol: string, connId: string, remotePath: string) =>
+      ipcRenderer.invoke('app:editRemoteFile', protocol, connId, remotePath),
+    saveRemoteFile: (protocol: string, connId: string, remotePath: string, content: string) =>
+      ipcRenderer.invoke('app:saveRemoteFile', protocol, connId, remotePath, content),
+    exportLogs: (content: string) => ipcRenderer.invoke('app:exportLogs', content),
   },
 };
 

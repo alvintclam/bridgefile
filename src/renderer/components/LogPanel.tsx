@@ -157,6 +157,29 @@ export default function LogPanel() {
     setLogs([]);
   }, []);
 
+  const exportLogs = useCallback(() => {
+    const lines = logs.map(
+      (entry) =>
+        `[${entry.timestamp.toISOString()}] [${entry.level.toUpperCase()}] ${entry.message}`,
+    );
+    const content = lines.join('\n');
+
+    if (typeof window !== 'undefined' && window.bridgefile) {
+      window.bridgefile.app.exportLogs(content).catch((err: unknown) => {
+        console.error('Export failed:', err);
+      });
+    } else {
+      // Fallback: download as blob
+      const blob = new Blob([content], { type: 'text/plain' });
+      const url = URL.createObjectURL(blob);
+      const a = document.createElement('a');
+      a.href = url;
+      a.download = `bridgefile-logs-${new Date().toISOString().slice(0, 10)}.txt`;
+      a.click();
+      URL.revokeObjectURL(url);
+    }
+  }, [logs]);
+
   const copyEntry = useCallback((entry: LogEntry) => {
     const text = `[${formatTime(entry.timestamp)}] [${entry.level.toUpperCase()}] ${entry.message}`;
     navigator.clipboard?.writeText(text);
@@ -182,12 +205,20 @@ export default function LogPanel() {
             </button>
           )}
         </div>
-        <button
-          onClick={clearLogs}
-          className="text-[11px] text-[#71717a] hover:text-[#a1a1aa] transition-colors"
-        >
-          Clear
-        </button>
+        <div className="flex items-center gap-2">
+          <button
+            onClick={exportLogs}
+            className="text-[11px] text-[#71717a] hover:text-[#a1a1aa] transition-colors"
+          >
+            Export
+          </button>
+          <button
+            onClick={clearLogs}
+            className="text-[11px] text-[#71717a] hover:text-[#a1a1aa] transition-colors"
+          >
+            Clear
+          </button>
+        </div>
       </div>
 
       {/* Log entries */}

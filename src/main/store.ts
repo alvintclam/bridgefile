@@ -160,7 +160,7 @@ function writeProfiles(profiles: StoredProfile[]): void {
 // ── Sensitive field definitions by protocol ────────────────────
 
 const SENSITIVE_KEYS: Record<string, string[]> = {
-  sftp: ['password', 'privateKey', 'passphrase'],
+  sftp: ['password', 'privateKey', 'passphrase', 'proxyPassword'],
   ftp: ['password'],
   s3: ['secretAccessKey'],
 };

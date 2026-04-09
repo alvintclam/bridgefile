@@ -29,6 +29,7 @@ export interface BridgeFileAPI {
     uploadDir(connId: string, localDir: string, remoteDir: string): Promise<void>;
     downloadDir(connId: string, remoteDir: string, localDir: string): Promise<void>;
     deleteDir(connId: string, dirPath: string): Promise<void>;
+    search(connId: string, basePath: string, pattern: string, recursive: boolean): Promise<FileEntry[]>;
   };
 
   ftp: {
@@ -43,6 +44,7 @@ export interface BridgeFileAPI {
     uploadDir(connId: string, localDir: string, remoteDir: string): Promise<void>;
     downloadDir(connId: string, remoteDir: string, localDir: string): Promise<void>;
     deleteDir(connId: string, dirPath: string): Promise<void>;
+    search(connId: string, basePath: string, pattern: string, recursive: boolean): Promise<FileEntry[]>;
   };
 
   s3: {
@@ -57,6 +59,7 @@ export interface BridgeFileAPI {
     uploadDir(connId: string, localDir: string, remoteDir: string): Promise<void>;
     downloadDir(connId: string, remoteDir: string, localDir: string): Promise<void>;
     deleteDir(connId: string, dirPath: string): Promise<void>;
+    search(connId: string, prefix: string, pattern: string): Promise<FileEntry[]>;
   };
 
   transfer: {
@@ -79,6 +82,9 @@ export interface BridgeFileAPI {
   app: {
     getVersion(): Promise<string>;
     getPlatform(): Promise<string>;
+    editRemoteFile(protocol: string, connId: string, remotePath: string): Promise<string>;
+    saveRemoteFile(protocol: string, connId: string, remotePath: string, content: string): Promise<void>;
+    exportLogs(content: string): Promise<boolean>;
   };
 }
 

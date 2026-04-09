@@ -518,6 +518,68 @@ export async function deleteDir(connId: string, dirPath: string): Promise<void> 
   }
 }
 
+// ── Search ──────────────────────────────────────────────────────
+
+/**
+ * Search for objects matching a pattern under a given prefix.
+ * Uses ListObjectsV2 without Delimiter to get all keys recursively.
+ */
+export async function search(
+  connId: string,
+  virtualPrefix: string,
+  pattern: string,
+): Promise<FileEntry[]> {
+  const conn = getConn(connId);
+  const regex = globToRegex(pattern);
+
+  let prefix = resolveKey(conn, virtualPrefix);
+  if (prefix && !prefix.endsWith('/')) prefix += '/';
+
+  const results: FileEntry[] = [];
+  let continuationToken: string | undefined;
+
+  do {
+    const resp = await conn.client.send(
+      new ListObjectsV2Command({
+        Bucket: conn.bucket,
+        Prefix: prefix,
+        ContinuationToken: continuationToken,
+        MaxKeys: 1000,
+      }),
+    );
+
+    for (const obj of resp.Contents ?? []) {
+      if (!obj.Key) continue;
+      if (obj.Key.endsWith('/')) continue; // skip directory markers
+
+      const fileName = obj.Key.split('/').pop() || '';
+      if (regex.test(fileName)) {
+        const displayPath = stripRootPrefix(conn, obj.Key);
+        results.push({
+          name: fileName,
+          path: '/' + displayPath,
+          size: obj.Size ?? 0,
+          modifiedAt: obj.LastModified?.getTime() ?? 0,
+          isDirectory: false,
+          meta: obj.StorageClass ? { storageClass: obj.StorageClass } : undefined,
+        });
+      }
+    }
+
+    continuationToken = resp.NextContinuationToken;
+  } while (continuationToken);
+
+  return results;
+}
+
+function globToRegex(glob: string): RegExp {
+  const escaped = glob
+    .replace(/[.+^${}()|[\]\\]/g, '\\$&')
+    .replace(/\*/g, '.*')
+    .replace(/\?/g, '.');
+  return new RegExp(`^${escaped}$`, 'i');
+}
+
 // ── Helpers ────────────────────────────────────────────────────
 
 /**

@@ -1,4 +1,4 @@
-import { ipcMain, app } from 'electron';
+import { ipcMain, app, dialog, BrowserWindow } from 'electron';
 import * as os from 'os';
 import * as fs from 'fs';
 import * as path from 'path';
@@ -627,5 +627,95 @@ export function registerIPCHandlers(): void {
 
   ipcMain.handle('app:getPlatform', async () => {
     return process.platform;
+  });
+
+  // ── Search ──────────────────────────────────────────────────
+
+  ipcMain.handle(
+    'sftp:search',
+    async (_event, connId: string, basePath: string, pattern: string, recursive: boolean) => {
+      return sftpClient.search(connId, basePath, pattern, recursive);
+    },
+  );
+
+  ipcMain.handle(
+    's3:search',
+    async (_event, connId: string, prefix: string, pattern: string) => {
+      return s3Client.search(connId, prefix, pattern);
+    },
+  );
+
+  ipcMain.handle(
+    'ftp:search',
+    async (_event, connId: string, basePath: string, pattern: string, recursive: boolean) => {
+      return ftpClient.search(connId, basePath, pattern, recursive);
+    },
+  );
+
+  // ── Remote file editing ───────────────────────────────────
+
+  ipcMain.handle(
+    'app:editRemoteFile',
+    async (_event, protocol: string, connId: string, remotePath: string) => {
+      const tmpDir = path.join(app.getPath('temp'), 'bridgefile-edit');
+      fs.mkdirSync(tmpDir, { recursive: true });
+
+      const fileName = path.basename(remotePath);
+      const tmpPath = path.join(tmpDir, `${Date.now()}-${fileName}`);
+
+      if (protocol === 'sftp') {
+        await sftpClient.download(connId, remotePath, tmpPath);
+      } else if (protocol === 'ftp') {
+        await ftpClient.download(connId, remotePath, tmpPath);
+      } else if (protocol === 's3') {
+        await s3Client.download(connId, remotePath, tmpPath);
+      }
+
+      return tmpPath;
+    },
+  );
+
+  ipcMain.handle(
+    'app:saveRemoteFile',
+    async (_event, protocol: string, connId: string, remotePath: string, content: string) => {
+      const tmpDir = path.join(app.getPath('temp'), 'bridgefile-edit');
+      fs.mkdirSync(tmpDir, { recursive: true });
+
+      const fileName = path.basename(remotePath);
+      const tmpPath = path.join(tmpDir, `${Date.now()}-${fileName}`);
+      fs.writeFileSync(tmpPath, content, 'utf-8');
+
+      if (protocol === 'sftp') {
+        await sftpClient.upload(connId, tmpPath, remotePath);
+      } else if (protocol === 'ftp') {
+        await ftpClient.upload(connId, tmpPath, remotePath);
+      } else if (protocol === 's3') {
+        await s3Client.upload(connId, tmpPath, remotePath);
+      }
+
+      // Clean up temp file
+      try { fs.unlinkSync(tmpPath); } catch { /* ignore */ }
+    },
+  );
+
+  // ── Log export ────────────────────────────────────────────
+
+  ipcMain.handle('app:exportLogs', async (_event, content: string) => {
+    const win = BrowserWindow.getFocusedWindow();
+    if (!win) return false;
+
+    const result = await dialog.showSaveDialog(win, {
+      title: 'Export Logs',
+      defaultPath: `bridgefile-logs-${new Date().toISOString().slice(0, 10)}.txt`,
+      filters: [
+        { name: 'Text Files', extensions: ['txt'] },
+        { name: 'All Files', extensions: ['*'] },
+      ],
+    });
+
+    if (result.canceled || !result.filePath) return false;
+
+    fs.writeFileSync(result.filePath, content, 'utf-8');
+    return true;
   });
 }

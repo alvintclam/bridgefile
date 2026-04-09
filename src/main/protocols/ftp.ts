@@ -434,6 +434,50 @@ export async function deleteDir(connId: string, dirPath: string): Promise<void> 
   await client.removeDir(dirPath);
 }
 
+// ── Search ──────────────────────────────────────────────────────
+
+/**
+ * Recursively search for files matching a glob-like pattern.
+ */
+export async function search(
+  connId: string,
+  basePath: string,
+  pattern: string,
+  recursive: boolean,
+): Promise<FileEntry[]> {
+  const results: FileEntry[] = [];
+  const regex = globToRegex(pattern);
+
+  async function walk(dirPath: string): Promise<void> {
+    let entries: FileEntry[];
+    try {
+      entries = await list(connId, dirPath);
+    } catch {
+      return; // skip unreadable directories
+    }
+
+    for (const entry of entries) {
+      if (!entry.isDirectory && regex.test(entry.name)) {
+        results.push(entry);
+      }
+      if (entry.isDirectory && recursive) {
+        await walk(entry.path);
+      }
+    }
+  }
+
+  await walk(basePath);
+  return results;
+}
+
+function globToRegex(glob: string): RegExp {
+  const escaped = glob
+    .replace(/[.+^${}()|[\]\\]/g, '\\$&')
+    .replace(/\*/g, '.*')
+    .replace(/\?/g, '.');
+  return new RegExp(`^${escaped}$`, 'i');
+}
+
 // ── Helpers ────────────────────────────────────────────────────
 
 function formatPermissions(entry: FileInfo): string {

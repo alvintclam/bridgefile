@@ -6,12 +6,19 @@ export interface ConnectionProfile {
   type: 'SFTP' | 'S3' | 'FTP';
   favorite: boolean;
   lastUsed?: Date;
+  /** Group/folder for organizing connections */
+  group?: string;
   // SFTP
   host?: string;
   port?: number;
   username?: string;
   password?: string;
   privateKeyPath?: string;
+  // SFTP proxy / jump host
+  proxyHost?: string;
+  proxyPort?: number;
+  proxyUsername?: string;
+  proxyPassword?: string;
   // FTP / FTPS
   secure?: boolean;
   // S3
@@ -29,6 +36,8 @@ interface ConnectionManagerProps {
   onConnect: (profile: ConnectionProfile, connectionId: string) => void;
 }
 
+const DEFAULT_GROUPS = ['Production', 'Staging', 'Personal'];
+
 const MOCK_PROFILES: ConnectionProfile[] = [
   {
     id: '1',
@@ -39,6 +48,7 @@ const MOCK_PROFILES: ConnectionProfile[] = [
     host: '192.168.1.100',
     port: 22,
     username: 'deploy',
+    group: 'Production',
   },
   {
     id: '2',
@@ -49,6 +59,7 @@ const MOCK_PROFILES: ConnectionProfile[] = [
     host: 'staging.example.com',
     port: 22,
     username: 'ubuntu',
+    group: 'Staging',
   },
   {
     id: '3',
@@ -58,6 +69,7 @@ const MOCK_PROFILES: ConnectionProfile[] = [
     lastUsed: new Date('2026-04-07'),
     bucket: 'company-assets',
     region: 'us-east-1',
+    group: 'Production',
   },
   {
     id: '4',
@@ -68,6 +80,7 @@ const MOCK_PROFILES: ConnectionProfile[] = [
     bucket: 'backups',
     region: 'us-east-1',
     endpoint: 'https://minio.internal:9000',
+    group: 'Personal',
   },
 ];
 
@@ -79,7 +92,12 @@ const EMPTY_SFTP: Partial<ConnectionProfile> = {
   username: '',
   password: '',
   privateKeyPath: '',
+  proxyHost: '',
+  proxyPort: 22,
+  proxyUsername: '',
+  proxyPassword: '',
   favorite: false,
+  group: '',
 };
 
 const EMPTY_FTP: Partial<ConnectionProfile> = {
@@ -91,6 +109,7 @@ const EMPTY_FTP: Partial<ConnectionProfile> = {
   password: '',
   secure: false,
   favorite: false,
+  group: '',
 };
 
 const EMPTY_S3: Partial<ConnectionProfile> = {
@@ -103,6 +122,7 @@ const EMPTY_S3: Partial<ConnectionProfile> = {
   prefix: '',
   endpoint: '',
   favorite: false,
+  group: '',
 };
 
 function isElectron(): boolean {
@@ -121,6 +141,11 @@ export default function ConnectionManager({
   const [isEditing, setIsEditing] = useState(false);
   const [connecting, setConnecting] = useState(false);
   const [connectError, setConnectError] = useState<string | null>(null);
+  const [showProxy, setShowProxy] = useState(false);
+  const [groups, setGroups] = useState<string[]>(DEFAULT_GROUPS);
+  const [collapsedGroups, setCollapsedGroups] = useState<Set<string>>(new Set());
+  const [newGroupName, setNewGroupName] = useState<string | null>(null);
+  const [dragProfileId, setDragProfileId] = useState<string | null>(null);
 
   if (!isOpen) return null;
 
@@ -203,13 +228,20 @@ export default function ConnectionManager({
       let connId: string;
 
       if (profile.type === 'SFTP') {
-        connId = await window.bridgefile.sftp.connect({
+        const sftpConfig: Record<string, unknown> = {
           host: profile.host || '',
           port: profile.port || 22,
           username: profile.username || '',
           password: profile.password,
           privateKey: profile.privateKeyPath,
-        });
+        };
+        if (profile.proxyHost) {
+          sftpConfig.proxyHost = profile.proxyHost;
+          sftpConfig.proxyPort = profile.proxyPort || 22;
+          sftpConfig.proxyUsername = profile.proxyUsername;
+          sftpConfig.proxyPassword = profile.proxyPassword;
+        }
+        connId = await window.bridgefile.sftp.connect(sftpConfig as any);
       } else if (profile.type === 'FTP') {
         connId = await window.bridgefile.ftp.connect({
           host: profile.host || '',
@@ -256,19 +288,97 @@ export default function ConnectionManager({
     .sort((a, b) => (b.lastUsed?.getTime() || 0) - (a.lastUsed?.getTime() || 0))
     .slice(0, 5);
 
+  // Group profiles by their group field
+  const groupedProfiles = new Map<string, ConnectionProfile[]>();
+  const ungrouped: ConnectionProfile[] = [];
+  for (const p of profiles) {
+    if (p.group) {
+      if (!groupedProfiles.has(p.group)) groupedProfiles.set(p.group, []);
+      groupedProfiles.get(p.group)!.push(p);
+    } else {
+      ungrouped.push(p);
+    }
+  }
+  // Ensure all known groups appear even if empty
+  for (const g of groups) {
+    if (!groupedProfiles.has(g)) groupedProfiles.set(g, []);
+  }
+
+  const toggleGroupCollapsed = (group: string) => {
+    setCollapsedGroups(prev => {
+      const next = new Set(prev);
+      if (next.has(group)) next.delete(group);
+      else next.add(group);
+      return next;
+    });
+  };
+
+  const handleDragStart = (profileId: string) => {
+    setDragProfileId(profileId);
+  };
+
+  const handleDropOnGroup = (group: string) => {
+    if (!dragProfileId) return;
+    setProfiles(prev =>
+      prev.map(p => (p.id === dragProfileId ? { ...p, group } : p)),
+    );
+    // Also update form data if the dragged profile is selected
+    if (dragProfileId === selectedId) {
+      setFormData(prev => ({ ...prev, group }));
+    }
+    setDragProfileId(null);
+  };
+
+  const handleCreateGroup = () => {
+    if (newGroupName && newGroupName.trim() && !groups.includes(newGroupName.trim())) {
+      setGroups(prev => [...prev, newGroupName.trim()]);
+    }
+    setNewGroupName(null);
+  };
+
   return (
     <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/60 backdrop-blur-sm">
-      <div className="w-[720px] max-h-[560px] bg-[#12121a] border border-[#1e1e2e] rounded-lg shadow-2xl flex overflow-hidden">
+      <div className="w-[720px] max-h-[600px] bg-[#12121a] border border-[#1e1e2e] rounded-lg shadow-2xl flex overflow-hidden">
         {/* Left: Profile list */}
         <div className="w-56 border-r border-[#1e1e2e] flex flex-col">
           <div className="p-3 border-b border-[#1e1e2e]">
             <h2 className="text-sm font-semibold text-[#e4e4e7] mb-2">Connections</h2>
-            <button
-              onClick={handleNewConnection}
-              className="w-full px-2.5 py-1.5 text-xs rounded bg-[#3b82f6] text-white hover:bg-[#2563eb] transition-colors"
-            >
-              + New Connection
-            </button>
+            <div className="flex gap-1">
+              <button
+                onClick={handleNewConnection}
+                className="flex-1 px-2.5 py-1.5 text-xs rounded bg-[#3b82f6] text-white hover:bg-[#2563eb] transition-colors"
+              >
+                + New
+              </button>
+              <button
+                onClick={() => setNewGroupName('')}
+                className="px-2 py-1.5 text-xs rounded text-[#a1a1aa] hover:bg-[#1a1a26] border border-[#1e1e2e] transition-colors"
+                title="New Group"
+              >
+                <svg width="12" height="12" viewBox="0 0 24 24" fill="none">
+                  <path d="M22 19a2 2 0 01-2 2H4a2 2 0 01-2-2V5a2 2 0 012-2h5l2 3h9a2 2 0 012 2z" stroke="currentColor" strokeWidth="2" />
+                </svg>
+              </button>
+            </div>
+            {newGroupName !== null && (
+              <div className="mt-2 flex gap-1">
+                <input
+                  type="text"
+                  value={newGroupName}
+                  onChange={e => setNewGroupName(e.target.value)}
+                  onKeyDown={e => { if (e.key === 'Enter') handleCreateGroup(); if (e.key === 'Escape') setNewGroupName(null); }}
+                  placeholder="Group name"
+                  className="flex-1 px-2 py-1 text-xs bg-[#0a0a0f] border border-[#1e1e2e] rounded text-[#e4e4e7] placeholder-[#71717a] focus:border-[#3b82f6] focus:outline-none"
+                  autoFocus
+                />
+                <button
+                  onClick={handleCreateGroup}
+                  className="px-2 py-1 text-xs rounded bg-emerald-500/15 text-emerald-400 hover:bg-emerald-500/25 transition-colors"
+                >
+                  Add
+                </button>
+              </div>
+            )}
           </div>
 
           <div className="flex-1 overflow-y-auto">
@@ -285,44 +395,71 @@ export default function ConnectionManager({
                     selected={p.id === selectedId}
                     onSelect={() => handleSelectProfile(p)}
                     onToggleFavorite={() => toggleFavorite(p.id)}
+                    onDragStart={() => handleDragStart(p.id)}
                   />
                 ))}
               </div>
             )}
 
-            {/* Recent */}
-            {recent.length > 0 && (
-              <div className="px-3 pt-3">
+            {/* Groups */}
+            {[...groupedProfiles.entries()].map(([groupName, groupProfiles]) => (
+              <div
+                key={groupName}
+                className="px-3 pt-3"
+                onDragOver={e => { e.preventDefault(); e.dataTransfer.dropEffect = 'move'; }}
+                onDrop={e => { e.preventDefault(); handleDropOnGroup(groupName); }}
+              >
+                <button
+                  onClick={() => toggleGroupCollapsed(groupName)}
+                  className="flex items-center gap-1 text-[10px] uppercase tracking-wider text-[#71717a] mb-1.5 font-medium w-full text-left hover:text-[#a1a1aa] transition-colors"
+                >
+                  <svg
+                    width="10"
+                    height="10"
+                    viewBox="0 0 24 24"
+                    fill="none"
+                    className={`transition-transform ${collapsedGroups.has(groupName) ? '' : 'rotate-90'}`}
+                  >
+                    <path d="M9 18l6-6-6-6" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" />
+                  </svg>
+                  <svg width="10" height="10" viewBox="0 0 24 24" fill="none" className="text-[#71717a]">
+                    <path d="M22 19a2 2 0 01-2 2H4a2 2 0 01-2-2V5a2 2 0 012-2h5l2 3h9a2 2 0 012 2z" stroke="currentColor" strokeWidth="1.5" />
+                  </svg>
+                  {groupName}
+                  <span className="text-[9px] text-[#4a4a5a] ml-auto">{groupProfiles.length}</span>
+                </button>
+                {!collapsedGroups.has(groupName) &&
+                  groupProfiles.map(p => (
+                    <ProfileItem
+                      key={p.id}
+                      profile={p}
+                      selected={p.id === selectedId}
+                      onSelect={() => handleSelectProfile(p)}
+                      onToggleFavorite={() => toggleFavorite(p.id)}
+                      onDragStart={() => handleDragStart(p.id)}
+                    />
+                  ))}
+              </div>
+            ))}
+
+            {/* Ungrouped */}
+            {ungrouped.length > 0 && (
+              <div className="px-3 pt-3 pb-3">
                 <div className="text-[10px] uppercase tracking-wider text-[#71717a] mb-1.5 font-medium">
-                  Recent
+                  Ungrouped
                 </div>
-                {recent.map(p => (
+                {ungrouped.map(p => (
                   <ProfileItem
                     key={p.id}
                     profile={p}
                     selected={p.id === selectedId}
                     onSelect={() => handleSelectProfile(p)}
                     onToggleFavorite={() => toggleFavorite(p.id)}
+                    onDragStart={() => handleDragStart(p.id)}
                   />
                 ))}
               </div>
             )}
-
-            {/* All */}
-            <div className="px-3 pt-3 pb-3">
-              <div className="text-[10px] uppercase tracking-wider text-[#71717a] mb-1.5 font-medium">
-                All
-              </div>
-              {profiles.map(p => (
-                <ProfileItem
-                  key={p.id}
-                  profile={p}
-                  selected={p.id === selectedId}
-                  onSelect={() => handleSelectProfile(p)}
-                  onToggleFavorite={() => toggleFavorite(p.id)}
-                />
-              ))}
-            </div>
           </div>
         </div>
 
@@ -389,6 +526,23 @@ export default function ConnectionManager({
               />
             </div>
 
+            {/* Group selector */}
+            <div className="mb-3">
+              <label className="block text-[11px] text-[#71717a] mb-1 uppercase tracking-wide">
+                Group
+              </label>
+              <select
+                value={formData.group || ''}
+                onChange={e => updateField('group', e.target.value)}
+                className="w-full px-2.5 py-1.5 text-sm bg-[#0a0a0f] border border-[#1e1e2e] rounded text-[#e4e4e7] focus:border-[#3b82f6] focus:outline-none transition-colors"
+              >
+                <option value="">No group</option>
+                {groups.map(g => (
+                  <option key={g} value={g}>{g}</option>
+                ))}
+              </select>
+            </div>
+
             {activeTab === 'SFTP' ? (
               <>
                 <div className="grid grid-cols-3 gap-3 mb-3">
@@ -451,6 +605,78 @@ export default function ConnectionManager({
                     placeholder="~/.ssh/id_rsa"
                     className="w-full px-2.5 py-1.5 text-sm bg-[#0a0a0f] border border-[#1e1e2e] rounded text-[#e4e4e7] placeholder-[#71717a] focus:border-[#3b82f6] focus:outline-none transition-colors font-mono text-xs"
                   />
+                </div>
+
+                {/* Jump Host / Proxy section */}
+                <div className="mb-3">
+                  <button
+                    onClick={() => setShowProxy(!showProxy)}
+                    className="flex items-center gap-1.5 text-[11px] text-[#71717a] hover:text-[#a1a1aa] uppercase tracking-wide transition-colors"
+                  >
+                    <svg
+                      width="10"
+                      height="10"
+                      viewBox="0 0 24 24"
+                      fill="none"
+                      className={`transition-transform ${showProxy ? 'rotate-90' : ''}`}
+                    >
+                      <path d="M9 18l6-6-6-6" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" />
+                    </svg>
+                    Jump Host / Proxy
+                  </button>
+                  {showProxy && (
+                    <div className="mt-2 pl-3 border-l-2 border-[#1e1e2e]">
+                      <div className="grid grid-cols-3 gap-3 mb-2">
+                        <div className="col-span-2">
+                          <label className="block text-[10px] text-[#71717a] mb-1 uppercase tracking-wide">
+                            Proxy Host
+                          </label>
+                          <input
+                            type="text"
+                            value={formData.proxyHost || ''}
+                            onChange={e => updateField('proxyHost', e.target.value)}
+                            placeholder="jump.example.com"
+                            className="w-full px-2.5 py-1.5 text-sm bg-[#0a0a0f] border border-[#1e1e2e] rounded text-[#e4e4e7] placeholder-[#71717a] focus:border-[#3b82f6] focus:outline-none transition-colors"
+                          />
+                        </div>
+                        <div>
+                          <label className="block text-[10px] text-[#71717a] mb-1 uppercase tracking-wide">
+                            Port
+                          </label>
+                          <input
+                            type="number"
+                            value={formData.proxyPort || 22}
+                            onChange={e => updateField('proxyPort', parseInt(e.target.value) || 22)}
+                            className="w-full px-2.5 py-1.5 text-sm bg-[#0a0a0f] border border-[#1e1e2e] rounded text-[#e4e4e7] focus:border-[#3b82f6] focus:outline-none transition-colors"
+                          />
+                        </div>
+                      </div>
+                      <div className="mb-2">
+                        <label className="block text-[10px] text-[#71717a] mb-1 uppercase tracking-wide">
+                          Proxy Username
+                        </label>
+                        <input
+                          type="text"
+                          value={formData.proxyUsername || ''}
+                          onChange={e => updateField('proxyUsername', e.target.value)}
+                          placeholder="Same as above if blank"
+                          className="w-full px-2.5 py-1.5 text-sm bg-[#0a0a0f] border border-[#1e1e2e] rounded text-[#e4e4e7] placeholder-[#71717a] focus:border-[#3b82f6] focus:outline-none transition-colors"
+                        />
+                      </div>
+                      <div className="mb-2">
+                        <label className="block text-[10px] text-[#71717a] mb-1 uppercase tracking-wide">
+                          Proxy Password
+                        </label>
+                        <input
+                          type="password"
+                          value={formData.proxyPassword || ''}
+                          onChange={e => updateField('proxyPassword', e.target.value)}
+                          placeholder="Proxy password"
+                          className="w-full px-2.5 py-1.5 text-sm bg-[#0a0a0f] border border-[#1e1e2e] rounded text-[#e4e4e7] placeholder-[#71717a] focus:border-[#3b82f6] focus:outline-none transition-colors"
+                        />
+                      </div>
+                    </div>
+                  )}
                 </div>
               </>
             ) : activeTab === 'FTP' ? (
@@ -668,15 +894,23 @@ function ProfileItem({
   selected,
   onSelect,
   onToggleFavorite,
+  onDragStart,
 }: {
   profile: ConnectionProfile;
   selected: boolean;
   onSelect: () => void;
   onToggleFavorite: () => void;
+  onDragStart?: () => void;
 }) {
   return (
     <div
       onClick={onSelect}
+      draggable
+      onDragStart={e => {
+        e.dataTransfer.effectAllowed = 'move';
+        e.dataTransfer.setData('text/plain', profile.id);
+        onDragStart?.();
+      }}
       className={`flex items-center gap-2 px-2 py-1.5 rounded text-xs cursor-pointer group transition-colors mb-0.5 ${
         selected
           ? 'bg-[#3b82f6]/10 text-[#e4e4e7]'

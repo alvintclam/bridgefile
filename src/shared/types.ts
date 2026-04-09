@@ -9,6 +9,11 @@ export interface SFTPConfig {
   password?: string;
   privateKey?: string;
   passphrase?: string;
+  /** Jump host / proxy for tunnelling */
+  proxyHost?: string;
+  proxyPort?: number;
+  proxyUsername?: string;
+  proxyPassword?: string;
 }
 
 export interface FTPConfig {
@@ -44,6 +49,8 @@ export interface ConnectionProfile {
   config: SFTPConfig | FTPConfig | S3Config;
   lastUsed?: number;
   favorite: boolean;
+  /** Group/folder for organizing connections in the site manager */
+  group?: string;
 }
 
 // ── File entries ────────────────────────────────────────────────
@@ -170,6 +177,18 @@ export interface IPCChannels {
   'bookmarks:getAll': () => BookmarkEntry[];
   'bookmarks:add': (bookmark: Omit<BookmarkEntry, 'id' | 'createdAt'>) => BookmarkEntry;
   'bookmarks:delete': (id: string) => boolean;
+
+  // Search
+  'sftp:search': (connId: string, basePath: string, pattern: string, recursive: boolean) => FileEntry[];
+  's3:search': (connId: string, prefix: string, pattern: string) => FileEntry[];
+  'ftp:search': (connId: string, basePath: string, pattern: string, recursive: boolean) => FileEntry[];
+
+  // Remote file editing
+  'app:editRemoteFile': (protocol: string, connId: string, remotePath: string) => string;
+  'app:saveRemoteFile': (protocol: string, connId: string, remotePath: string, content: string) => void;
+
+  // Log export
+  'app:exportLogs': (content: string) => boolean;
 
   // App
   'app:getVersion': () => string;

@@ -127,6 +127,11 @@ async function withReconnect<T>(
 export async function connect(config: SFTPConfig): Promise<string> {
   const id = crypto.randomUUID();
 
+  // If proxy/jump host is configured, tunnel through it
+  if (config.proxyHost) {
+    return connectViaProxy(id, config);
+  }
+
   return new Promise<string>((resolve, reject) => {
     const client = new Client();
 
@@ -170,6 +175,102 @@ export async function connect(config: SFTPConfig): Promise<string> {
     });
 
     client.connect(connectConfig as any);
+  });
+}
+
+/**
+ * Connect via a jump/proxy host.
+ * 1. SSH into the proxy host
+ * 2. Use forwardOut to create a tunnel to the target host
+ * 3. Create a second SSH connection through that tunnel
+ */
+async function connectViaProxy(id: string, config: SFTPConfig): Promise<string> {
+  return new Promise<string>((resolve, reject) => {
+    const proxyClient = new Client();
+
+    const proxyConfig: Record<string, unknown> = {
+      host: config.proxyHost,
+      port: config.proxyPort ?? 22,
+      username: config.proxyUsername ?? config.username,
+      readyTimeout: 15_000,
+      keepaliveInterval: 10_000,
+    };
+
+    if (config.proxyPassword) {
+      proxyConfig.password = config.proxyPassword;
+    }
+
+    proxyClient.on('ready', () => {
+      const targetHost = config.host;
+      const targetPort = config.port ?? 22;
+
+      proxyClient.forwardOut(
+        '127.0.0.1',
+        0,
+        targetHost,
+        targetPort,
+        (err, stream) => {
+          if (err) {
+            proxyClient.end();
+            return reject(new Error(`Tunnel through proxy failed: ${err.message}`));
+          }
+
+          const targetClient = new Client();
+
+          const targetConfig: Record<string, unknown> = {
+            sock: stream,
+            username: config.username,
+            readyTimeout: 15_000,
+            keepaliveInterval: 10_000,
+          };
+
+          if (config.privateKey) {
+            targetConfig.privateKey = config.privateKey;
+            if (config.passphrase) targetConfig.passphrase = config.passphrase;
+          } else if (config.password) {
+            targetConfig.password = config.password;
+          }
+
+          targetClient.on('ready', () => {
+            targetClient.sftp((sftpErr, sftp) => {
+              if (sftpErr) {
+                targetClient.end();
+                proxyClient.end();
+                return reject(new Error(`SFTP subsystem failed via proxy: ${sftpErr.message}`));
+              }
+
+              pool.set(id, {
+                id,
+                client: targetClient,
+                sftp,
+                config,
+                lastActivity: Date.now(),
+              });
+
+              // Clean up proxy when target disconnects
+              targetClient.on('close', () => {
+                proxyClient.end();
+              });
+
+              resolve(id);
+            });
+          });
+
+          targetClient.on('error', (targetErr) => {
+            proxyClient.end();
+            reject(new Error(`SSH connection via proxy failed: ${targetErr.message}`));
+          });
+
+          targetClient.connect(targetConfig as any);
+        },
+      );
+    });
+
+    proxyClient.on('error', (proxyErr) => {
+      reject(new Error(`Proxy SSH connection failed: ${proxyErr.message}`));
+    });
+
+    proxyClient.connect(proxyConfig as any);
   });
 }
 
@@ -607,6 +708,50 @@ async function resumeDownload(
       readStream.pipe(writeStream);
     });
   });
+}
+
+// ── Search ──────────────────────────────────────────────────────
+
+/**
+ * Recursively search for files matching a glob-like pattern.
+ */
+export async function search(
+  connId: string,
+  basePath: string,
+  pattern: string,
+  recursive: boolean,
+): Promise<FileEntry[]> {
+  const results: FileEntry[] = [];
+  const regex = globToRegex(pattern);
+
+  async function walk(dirPath: string): Promise<void> {
+    let entries: FileEntry[];
+    try {
+      entries = await list(connId, dirPath);
+    } catch {
+      return; // skip unreadable directories
+    }
+
+    for (const entry of entries) {
+      if (!entry.isDirectory && regex.test(entry.name)) {
+        results.push(entry);
+      }
+      if (entry.isDirectory && recursive) {
+        await walk(entry.path);
+      }
+    }
+  }
+
+  await walk(basePath);
+  return results;
+}
+
+function globToRegex(glob: string): RegExp {
+  const escaped = glob
+    .replace(/[.+^${}()|[\]\\]/g, '\\$&')
+    .replace(/\*/g, '.*')
+    .replace(/\?/g, '.');
+  return new RegExp(`^${escaped}$`, 'i');
 }
 
 // ── Helpers ────────────────────────────────────────────────────
