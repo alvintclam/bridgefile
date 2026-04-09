@@ -1,16 +1,20 @@
 import React, { useState, useMemo, useRef, useEffect, useCallback } from 'react';
 import { FileEntry, formatFileSize, formatDate, useFileOperations } from '../hooks/useFileOperations';
+import type { FileOperationsParams } from '../hooks/useFileOperations';
 
 interface FilePaneProps {
   side: 'local' | 'remote';
   label: string;
+  protocol?: 'sftp' | 's3' | 'ftp';
+  connectionId?: string;
 }
 
 type SortField = 'name' | 'size' | 'modified';
 type SortDirection = 'asc' | 'desc';
 
-export default function FilePane({ side, label }: FilePaneProps) {
-  const ops = useFileOperations(side);
+export default function FilePane({ side, label, protocol, connectionId }: FilePaneProps) {
+  const params: FileOperationsParams = { side, protocol, connectionId };
+  const ops = useFileOperations(params);
   const {
     files,
     currentPath,

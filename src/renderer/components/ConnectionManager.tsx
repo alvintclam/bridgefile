@@ -26,7 +26,7 @@ export interface ConnectionProfile {
 interface ConnectionManagerProps {
   isOpen: boolean;
   onClose: () => void;
-  onConnect: (profile: ConnectionProfile) => void;
+  onConnect: (profile: ConnectionProfile, connectionId: string) => void;
 }
 
 const MOCK_PROFILES: ConnectionProfile[] = [
@@ -105,6 +105,10 @@ const EMPTY_S3: Partial<ConnectionProfile> = {
   favorite: false,
 };
 
+function isElectron(): boolean {
+  return typeof window !== 'undefined' && typeof window.bridgefile !== 'undefined';
+}
+
 export default function ConnectionManager({
   isOpen,
   onClose,
@@ -115,6 +119,8 @@ export default function ConnectionManager({
   const [activeTab, setActiveTab] = useState<'SFTP' | 'FTP' | 'S3'>('SFTP');
   const [formData, setFormData] = useState<Partial<ConnectionProfile>>(EMPTY_SFTP);
   const [isEditing, setIsEditing] = useState(false);
+  const [connecting, setConnecting] = useState(false);
+  const [connectError, setConnectError] = useState<string | null>(null);
 
   if (!isOpen) return null;
 
@@ -125,6 +131,7 @@ export default function ConnectionManager({
     setFormData({ ...profile });
     setActiveTab(profile.type);
     setIsEditing(false);
+    setConnectError(null);
   };
 
   const getEmptyForm = (tab: 'SFTP' | 'FTP' | 'S3') => {
@@ -137,6 +144,7 @@ export default function ConnectionManager({
     setSelectedId(null);
     setIsEditing(true);
     setFormData(getEmptyForm(activeTab));
+    setConnectError(null);
   };
 
   const handleTabSwitch = (tab: 'SFTP' | 'FTP' | 'S3') => {
@@ -144,6 +152,7 @@ export default function ConnectionManager({
     if (isEditing && !selectedId) {
       setFormData(getEmptyForm(tab));
     }
+    setConnectError(null);
   };
 
   const handleSave = () => {
@@ -172,14 +181,62 @@ export default function ConnectionManager({
     setIsEditing(false);
   };
 
-  const handleConnect = () => {
+  const handleConnect = async () => {
     const profile = selectedProfile || ({
       ...formData,
       id: Date.now().toString(),
       type: activeTab,
       favorite: false,
     } as ConnectionProfile);
-    onConnect(profile);
+
+    setConnectError(null);
+
+    if (!isElectron()) {
+      // Not in Electron -- use a mock connectionId
+      onConnect(profile, 'mock-' + Date.now());
+      return;
+    }
+
+    setConnecting(true);
+
+    try {
+      let connId: string;
+
+      if (profile.type === 'SFTP') {
+        connId = await window.bridgefile.sftp.connect({
+          host: profile.host || '',
+          port: profile.port || 22,
+          username: profile.username || '',
+          password: profile.password,
+          privateKey: profile.privateKeyPath,
+        });
+      } else if (profile.type === 'FTP') {
+        connId = await window.bridgefile.ftp.connect({
+          host: profile.host || '',
+          port: profile.port || 21,
+          username: profile.username || '',
+          password: profile.password || '',
+          secure: profile.secure || false,
+        });
+      } else {
+        // S3
+        connId = await window.bridgefile.s3.connect({
+          accessKeyId: profile.accessKey || '',
+          secretAccessKey: profile.secretKey || '',
+          region: profile.region || 'us-east-1',
+          bucket: profile.bucket || '',
+          prefix: profile.prefix,
+          endpoint: profile.endpoint,
+        });
+      }
+
+      onConnect(profile, connId);
+    } catch (err: unknown) {
+      const msg = err instanceof Error ? err.message : String(err);
+      setConnectError(msg);
+    } finally {
+      setConnecting(false);
+    }
   };
 
   const toggleFavorite = (id: string) => {
@@ -190,6 +247,7 @@ export default function ConnectionManager({
 
   const updateField = (key: string, value: string | number | boolean) => {
     setFormData(prev => ({ ...prev, [key]: value }));
+    setConnectError(null);
   };
 
   const favorites = profiles.filter(p => p.favorite);
@@ -552,6 +610,13 @@ export default function ConnectionManager({
                 </div>
               </>
             )}
+
+            {/* Connection error display */}
+            {connectError && (
+              <div className="mt-2 px-3 py-2 text-xs text-red-400 bg-red-500/10 border border-red-500/20 rounded">
+                {connectError}
+              </div>
+            )}
           </div>
 
           {/* Bottom actions */}
@@ -581,9 +646,14 @@ export default function ConnectionManager({
               </button>
               <button
                 onClick={handleConnect}
-                className="px-4 py-1.5 text-xs rounded bg-[#3b82f6] text-white hover:bg-[#2563eb] transition-colors"
+                disabled={connecting}
+                className={`px-4 py-1.5 text-xs rounded transition-colors ${
+                  connecting
+                    ? 'bg-[#3b82f6]/50 text-white/50 cursor-wait'
+                    : 'bg-[#3b82f6] text-white hover:bg-[#2563eb]'
+                }`}
               >
-                Connect
+                {connecting ? 'Connecting...' : 'Connect'}
               </button>
             </div>
           </div>

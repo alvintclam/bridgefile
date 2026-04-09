@@ -10,11 +10,12 @@ import LogPanel from './components/LogPanel';
 type BottomTab = 'transfers' | 'log';
 
 export default function App() {
-  const [isConnected, setIsConnected] = useState(true);
-  const [protocol, setProtocol] = useState<'SFTP' | 'FTP' | 'S3' | null>('SFTP');
+  const [isConnected, setIsConnected] = useState(false);
+  const [protocol, setProtocol] = useState<'SFTP' | 'FTP' | 'S3' | null>(null);
+  const [connectionId, setConnectionId] = useState<string | null>(null);
   const [theme, setTheme] = useState<'dark' | 'light'>('dark');
-  const [host, setHost] = useState<string | null>('192.168.1.100');
-  const [remotePath, setRemotePath] = useState<string | null>('/var/www');
+  const [host, setHost] = useState<string | null>(null);
+  const [remotePath, setRemotePath] = useState<string | null>(null);
   const [showConnectionManager, setShowConnectionManager] = useState(false);
   const [bottomTab, setBottomTab] = useState<BottomTab>('transfers');
   const [bottomCollapsed, setBottomCollapsed] = useState(false);
@@ -25,9 +26,10 @@ export default function App() {
   const isDraggingDivider = useRef(false);
   const containerRef = useRef<HTMLDivElement>(null);
 
-  const handleConnect = (profile: ConnectionProfile) => {
+  const handleConnect = (profile: ConnectionProfile, connId: string) => {
     setIsConnected(true);
     setProtocol(profile.type);
+    setConnectionId(connId);
     setHost(
       profile.type === 'SFTP' || profile.type === 'FTP'
         ? profile.host || null
@@ -38,8 +40,17 @@ export default function App() {
   };
 
   const handleDisconnect = () => {
+    // Call disconnect via IPC if in Electron
+    if (typeof window !== 'undefined' && window.bridgefile && connectionId && protocol) {
+      const proto = protocol.toLowerCase() as 'sftp' | 's3' | 'ftp';
+      const api = window.bridgefile[proto];
+      api.disconnect(connectionId).catch((err: unknown) => {
+        console.error('Disconnect error:', err);
+      });
+    }
     setIsConnected(false);
     setProtocol(null);
+    setConnectionId(null);
     setHost(null);
     setRemotePath(null);
   };
@@ -88,6 +99,11 @@ export default function App() {
     setTheme(prev => (prev === 'dark' ? 'light' : 'dark'));
   };
 
+  // Derive the lowercase protocol for the remote pane
+  const remoteProtocol = protocol
+    ? (protocol.toLowerCase() as 'sftp' | 's3' | 'ftp')
+    : undefined;
+
   return (
     <div className={`flex flex-col h-screen select-none overflow-hidden ${
       theme === 'light'
@@ -110,6 +126,7 @@ export default function App() {
       {/* Bookmark bar */}
       <BookmarkBar
         currentPath={remotePath}
+        connectionId={connectionId}
         onNavigate={(path) => setRemotePath(path)}
       />
 
@@ -133,7 +150,12 @@ export default function App() {
 
         {/* Remote pane */}
         <div style={{ width: `${100 - dividerPos}%` }} className="min-w-0">
-          <FilePane side="remote" label="Remote" />
+          <FilePane
+            side="remote"
+            label="Remote"
+            protocol={remoteProtocol}
+            connectionId={connectionId ?? undefined}
+          />
         </div>
       </div>
 

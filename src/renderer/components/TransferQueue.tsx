@@ -1,4 +1,4 @@
-import React, { useState } from 'react';
+import React, { useState, useEffect, useRef, useCallback } from 'react';
 
 export type TransferStatus = 'queued' | 'transferring' | 'completed' | 'failed';
 
@@ -62,6 +62,59 @@ const MOCK_TRANSFERS: TransferItem[] = [
   },
 ];
 
+function isElectron(): boolean {
+  return typeof window !== 'undefined' && typeof window.bridgefile !== 'undefined';
+}
+
+/** Map IPC TransferItem (status: 'in-progress') to renderer TransferItem (status: 'transferring') */
+function mapIPCTransfer(raw: {
+  id: string;
+  fileName: string;
+  direction: 'upload' | 'download';
+  size: number;
+  transferred: number;
+  status: string;
+  error?: string;
+  startedAt?: number;
+  completedAt?: number;
+}): TransferItem {
+  let status: TransferStatus;
+  switch (raw.status) {
+    case 'in-progress':
+      status = 'transferring';
+      break;
+    case 'completed':
+      status = 'completed';
+      break;
+    case 'failed':
+      status = 'failed';
+      break;
+    case 'cancelled':
+      status = 'failed';
+      break;
+    default:
+      status = 'queued';
+  }
+
+  // Estimate speed from transferred and startedAt
+  let speed = 0;
+  if (status === 'transferring' && raw.startedAt) {
+    const elapsed = (Date.now() - raw.startedAt) / 1000;
+    if (elapsed > 0) speed = raw.transferred / elapsed;
+  }
+
+  return {
+    id: raw.id,
+    filename: raw.fileName,
+    direction: raw.direction,
+    size: raw.size,
+    transferred: raw.transferred,
+    speed,
+    status,
+    error: raw.error,
+  };
+}
+
 function formatSize(bytes: number): string {
   if (bytes === 0) return '0 B';
   const units = ['B', 'KB', 'MB', 'GB'];
@@ -90,17 +143,65 @@ const STATUS_STYLES: Record<TransferStatus, string> = {
 };
 
 export default function TransferQueue() {
-  const [transfers, setTransfers] = useState<TransferItem[]>(MOCK_TRANSFERS);
+  const [transfers, setTransfers] = useState<TransferItem[]>(
+    isElectron() ? [] : MOCK_TRANSFERS
+  );
+  const intervalRef = useRef<ReturnType<typeof setInterval> | null>(null);
+
+  // Poll IPC for real transfer data
+  const fetchQueue = useCallback(async () => {
+    if (!isElectron()) return;
+    try {
+      const rawQueue = await window.bridgefile.transfer.getQueue();
+      setTransfers(rawQueue.map(mapIPCTransfer));
+    } catch {
+      // Silently ignore polling errors
+    }
+  }, []);
+
+  useEffect(() => {
+    if (!isElectron()) return;
+
+    // Initial fetch
+    fetchQueue();
+
+    // Poll every 500ms
+    intervalRef.current = setInterval(fetchQueue, 500);
+
+    return () => {
+      if (intervalRef.current) {
+        clearInterval(intervalRef.current);
+        intervalRef.current = null;
+      }
+    };
+  }, [fetchQueue]);
 
   const clearCompleted = () => {
     setTransfers(prev => prev.filter(t => t.status !== 'completed'));
   };
 
-  const cancelTransfer = (id: string) => {
+  const cancelTransfer = async (id: string) => {
+    if (isElectron()) {
+      try {
+        await window.bridgefile.transfer.cancelTransfer(id);
+        // The next poll will update the list
+      } catch {
+        // Fall through to local removal
+      }
+    }
     setTransfers(prev => prev.filter(t => t.id !== id));
   };
 
-  const retryTransfer = (id: string) => {
+  const retryTransfer = async (id: string) => {
+    if (isElectron()) {
+      try {
+        await window.bridgefile.transfer.retryTransfer(id);
+        // The next poll will update the list
+        return;
+      } catch {
+        // Fall through to local retry
+      }
+    }
     setTransfers(prev =>
       prev.map(t =>
         t.id === id ? { ...t, status: 'queued' as TransferStatus, transferred: 0, error: undefined } : t

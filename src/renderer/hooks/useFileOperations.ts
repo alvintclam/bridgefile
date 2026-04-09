@@ -1,4 +1,4 @@
-import { useState, useCallback } from 'react';
+import { useState, useCallback, useEffect, useRef } from 'react';
 
 export interface FileEntry {
   name: string;
@@ -6,6 +6,12 @@ export interface FileEntry {
   size: number;
   modified: Date;
   permissions: string;
+}
+
+export interface FileOperationsParams {
+  side: 'local' | 'remote';
+  protocol?: 'sftp' | 's3' | 'ftp';
+  connectionId?: string;
 }
 
 export interface FileOperations {
@@ -21,6 +27,8 @@ export interface FileOperations {
   deleteFiles: (files: FileEntry[]) => void;
   refresh: () => void;
 }
+
+// ── Mock data for browser dev mode ──────────────────────────────
 
 const MOCK_LOCAL_FILES: Record<string, FileEntry[]> = {
   '/': [
@@ -91,65 +99,300 @@ const MOCK_REMOTE_FILES: Record<string, FileEntry[]> = {
   ],
 };
 
-export function useFileOperations(side: 'local' | 'remote'): FileOperations {
+// ── Helpers ─────────────────────────────────────────────────────
+
+function isElectron(): boolean {
+  return typeof window !== 'undefined' && typeof window.bridgefile !== 'undefined';
+}
+
+/** Convert IPC FileEntry (modifiedAt: number) to renderer FileEntry (modified: Date) */
+function toRendererEntry(raw: {
+  name: string;
+  isDirectory: boolean;
+  size: number;
+  modifiedAt: number;
+  permissions?: string;
+}): FileEntry {
+  return {
+    name: raw.name,
+    isDirectory: raw.isDirectory,
+    size: raw.size,
+    modified: new Date(raw.modifiedAt),
+    permissions: raw.permissions ?? (raw.isDirectory ? 'drwxr-xr-x' : '-rw-r--r--'),
+  };
+}
+
+function getProtocolApi(protocol: 'sftp' | 's3' | 'ftp') {
+  const api = window.bridgefile;
+  if (protocol === 'sftp') return api.sftp;
+  if (protocol === 's3') return api.s3;
+  return api.ftp;
+}
+
+function joinPath(base: string, name: string): string {
+  if (base === '/') return '/' + name;
+  return base + '/' + name;
+}
+
+// ── Hook ────────────────────────────────────────────────────────
+
+export function useFileOperations(params: FileOperationsParams): FileOperations {
+  const { side, protocol, connectionId } = params;
+
+  const useMock = !isElectron();
   const mockData = side === 'local' ? MOCK_LOCAL_FILES : MOCK_REMOTE_FILES;
+
   const [currentPath, setCurrentPath] = useState('/');
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState<string | null>(null);
-  const [files, setFiles] = useState<FileEntry[]>(mockData['/'] || []);
+  const [files, setFiles] = useState<FileEntry[]>(useMock ? (mockData['/'] || []) : []);
 
-  const loadFiles = useCallback((path: string) => {
+  // Keep a ref to the latest connectionId / protocol to avoid stale closures
+  const connRef = useRef({ connectionId, protocol });
+  connRef.current = { connectionId, protocol };
+
+  // ── List files via IPC ──────────────────────────────────────
+
+  const listViaIPC = useCallback(async (path: string) => {
+    try {
+      setLoading(true);
+      setError(null);
+
+      if (side === 'local') {
+        const rawEntries = await window.bridgefile.fs.listLocal(path);
+        setFiles(rawEntries.map(toRendererEntry));
+      } else {
+        const { connectionId: cid, protocol: proto } = connRef.current;
+        if (!cid || !proto) {
+          setFiles([]);
+          setError('Not connected');
+          return;
+        }
+        const api = getProtocolApi(proto);
+        const rawEntries = await api.list(cid, path);
+        setFiles(rawEntries.map(toRendererEntry));
+      }
+      setCurrentPath(path);
+    } catch (err: unknown) {
+      const msg = err instanceof Error ? err.message : String(err);
+      setError(msg);
+      setFiles([]);
+      setCurrentPath(path);
+    } finally {
+      setLoading(false);
+    }
+  }, [side]);
+
+  // ── Mock listing ────────────────────────────────────────────
+
+  const listViaMock = useCallback((path: string) => {
     setLoading(true);
     setError(null);
-    // Simulate async IPC call
     setTimeout(() => {
       const entries = mockData[path];
-      if (entries) {
-        setFiles(entries);
-        setCurrentPath(path);
-      } else {
-        setFiles([]);
-        setCurrentPath(path);
-      }
+      setFiles(entries || []);
+      setCurrentPath(path);
       setLoading(false);
     }, 150);
   }, [mockData]);
+
+  // ── Combined loadFiles ──────────────────────────────────────
+
+  const loadFiles = useCallback((path: string) => {
+    if (useMock) {
+      listViaMock(path);
+    } else {
+      listViaIPC(path);
+    }
+  }, [useMock, listViaMock, listViaIPC]);
+
+  // Load initial directory on mount or when connection changes
+  const prevConnId = useRef(connectionId);
+  useEffect(() => {
+    if (side === 'local') {
+      loadFiles('/');
+    } else if (connectionId && connectionId !== prevConnId.current) {
+      // New connection -- load root
+      loadFiles('/');
+    } else if (!connectionId && !useMock) {
+      // Disconnected
+      setFiles([]);
+      setCurrentPath('/');
+      setError(null);
+    }
+    prevConnId.current = connectionId;
+  }, [connectionId, side, loadFiles, useMock]);
+
+  // ── navigate ────────────────────────────────────────────────
 
   const navigate = useCallback((path: string) => {
     loadFiles(path);
   }, [loadFiles]);
 
-  const upload = useCallback((_files: FileEntry[]) => {
-    console.log('[mock] upload', _files);
-  }, []);
+  // ── upload ──────────────────────────────────────────────────
 
-  const download = useCallback((_files: FileEntry[]) => {
-    console.log('[mock] download', _files);
-  }, []);
+  const upload = useCallback((fileEntries: FileEntry[]) => {
+    if (!isElectron()) {
+      console.log('[mock] upload', fileEntries);
+      return;
+    }
 
-  const mkdir = useCallback((name: string) => {
-    setFiles(prev => [
-      ...prev,
-      {
-        name,
-        isDirectory: true,
-        size: 0,
-        modified: new Date(),
-        permissions: 'drwxr-xr-x',
-      },
-    ]);
-  }, []);
+    const { connectionId: cid, protocol: proto } = connRef.current;
+    if (!cid || !proto) return;
 
-  const rename = useCallback((oldName: string, newName: string) => {
-    setFiles(prev =>
-      prev.map(f => (f.name === oldName ? { ...f, name: newName } : f))
-    );
-  }, []);
+    const api = getProtocolApi(proto);
 
-  const deleteFiles = useCallback((toDelete: FileEntry[]) => {
-    const names = new Set(toDelete.map(f => f.name));
-    setFiles(prev => prev.filter(f => !names.has(f.name)));
-  }, []);
+    (async () => {
+      try {
+        for (const f of fileEntries) {
+          const localPath = joinPath(currentPath, f.name);
+          // For upload, local file at currentPath (local pane) -> remote currentPath
+          await api.upload(cid, localPath, joinPath(currentPath, f.name));
+        }
+      } catch (err: unknown) {
+        const msg = err instanceof Error ? err.message : String(err);
+        setError(msg);
+      }
+    })();
+  }, [currentPath]);
+
+  // ── download ────────────────────────────────────────────────
+
+  const download = useCallback((fileEntries: FileEntry[]) => {
+    if (!isElectron()) {
+      console.log('[mock] download', fileEntries);
+      return;
+    }
+
+    const { connectionId: cid, protocol: proto } = connRef.current;
+    if (!cid || !proto) return;
+
+    const api = getProtocolApi(proto);
+
+    (async () => {
+      try {
+        for (const f of fileEntries) {
+          const remotePath = joinPath(currentPath, f.name);
+          await api.download(cid, remotePath, joinPath(currentPath, f.name));
+        }
+      } catch (err: unknown) {
+        const msg = err instanceof Error ? err.message : String(err);
+        setError(msg);
+      }
+    })();
+  }, [currentPath]);
+
+  // ── mkdir ───────────────────────────────────────────────────
+
+  const mkdirOp = useCallback((name: string) => {
+    if (!isElectron()) {
+      // Mock: add the folder locally
+      setFiles(prev => [
+        ...prev,
+        {
+          name,
+          isDirectory: true,
+          size: 0,
+          modified: new Date(),
+          permissions: 'drwxr-xr-x',
+        },
+      ]);
+      return;
+    }
+
+    const fullPath = joinPath(currentPath, name);
+
+    (async () => {
+      try {
+        if (side === 'local') {
+          // No local mkdir in API -- fall back to a mock-style local add
+          setFiles(prev => [
+            ...prev,
+            { name, isDirectory: true, size: 0, modified: new Date(), permissions: 'drwxr-xr-x' },
+          ]);
+          return;
+        }
+
+        const { connectionId: cid, protocol: proto } = connRef.current;
+        if (!cid || !proto) return;
+        const api = getProtocolApi(proto);
+        await api.mkdir(cid, fullPath);
+        // Refresh to show the new folder
+        loadFiles(currentPath);
+      } catch (err: unknown) {
+        const msg = err instanceof Error ? err.message : String(err);
+        setError(msg);
+      }
+    })();
+  }, [currentPath, side, loadFiles]);
+
+  // ── rename ──────────────────────────────────────────────────
+
+  const renameOp = useCallback((oldName: string, newName: string) => {
+    if (!isElectron()) {
+      setFiles(prev =>
+        prev.map(f => (f.name === oldName ? { ...f, name: newName } : f))
+      );
+      return;
+    }
+
+    (async () => {
+      try {
+        if (side === 'local') {
+          // No local rename in API
+          setFiles(prev =>
+            prev.map(f => (f.name === oldName ? { ...f, name: newName } : f))
+          );
+          return;
+        }
+
+        const { connectionId: cid, protocol: proto } = connRef.current;
+        if (!cid || !proto) return;
+        const api = getProtocolApi(proto);
+        const oldPath = joinPath(currentPath, oldName);
+        const newPath = joinPath(currentPath, newName);
+        await api.rename(cid, oldPath, newPath);
+        loadFiles(currentPath);
+      } catch (err: unknown) {
+        const msg = err instanceof Error ? err.message : String(err);
+        setError(msg);
+      }
+    })();
+  }, [currentPath, side, loadFiles]);
+
+  // ── deleteFiles ─────────────────────────────────────────────
+
+  const deleteFilesOp = useCallback((toDelete: FileEntry[]) => {
+    if (!isElectron()) {
+      const names = new Set(toDelete.map(f => f.name));
+      setFiles(prev => prev.filter(f => !names.has(f.name)));
+      return;
+    }
+
+    (async () => {
+      try {
+        if (side === 'local') {
+          // No local delete in API
+          const names = new Set(toDelete.map(f => f.name));
+          setFiles(prev => prev.filter(f => !names.has(f.name)));
+          return;
+        }
+
+        const { connectionId: cid, protocol: proto } = connRef.current;
+        if (!cid || !proto) return;
+        const api = getProtocolApi(proto);
+        for (const f of toDelete) {
+          await api.delete(cid, joinPath(currentPath, f.name));
+        }
+        loadFiles(currentPath);
+      } catch (err: unknown) {
+        const msg = err instanceof Error ? err.message : String(err);
+        setError(msg);
+      }
+    })();
+  }, [currentPath, side, loadFiles]);
+
+  // ── refresh ─────────────────────────────────────────────────
 
   const refresh = useCallback(() => {
     loadFiles(currentPath);
@@ -163,12 +406,14 @@ export function useFileOperations(side: 'local' | 'remote'): FileOperations {
     navigate,
     upload,
     download,
-    mkdir,
-    rename,
-    deleteFiles,
+    mkdir: mkdirOp,
+    rename: renameOp,
+    deleteFiles: deleteFilesOp,
     refresh,
   };
 }
+
+// ── Utility exports ─────────────────────────────────────────────
 
 export function formatFileSize(bytes: number): string {
   if (bytes === 0) return '--';

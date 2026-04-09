@@ -1,4 +1,4 @@
-import React, { useState } from 'react';
+import React, { useState, useEffect, useCallback } from 'react';
 
 interface BookmarkItem {
   id: string;
@@ -10,6 +10,7 @@ interface BookmarkItem {
 
 interface BookmarkBarProps {
   currentPath: string | null;
+  connectionId?: string | null;
   onNavigate: (path: string) => void;
 }
 
@@ -19,26 +20,68 @@ const MOCK_BOOKMARKS: BookmarkItem[] = [
   { id: '3', connectionId: 'conn-1', path: '/etc/nginx', name: 'nginx conf', createdAt: Date.now() - 30000000 },
 ];
 
-export default function BookmarkBar({ currentPath, onNavigate }: BookmarkBarProps) {
-  const [bookmarks, setBookmarks] = useState<BookmarkItem[]>(MOCK_BOOKMARKS);
+function isElectron(): boolean {
+  return typeof window !== 'undefined' && typeof window.bridgefile !== 'undefined';
+}
 
-  const handleAddBookmark = () => {
+export default function BookmarkBar({ currentPath, connectionId, onNavigate }: BookmarkBarProps) {
+  const [bookmarks, setBookmarks] = useState<BookmarkItem[]>(
+    isElectron() ? [] : MOCK_BOOKMARKS
+  );
+
+  // Load bookmarks from IPC on mount
+  const loadBookmarks = useCallback(async () => {
+    if (!isElectron()) return;
+    try {
+      const allBookmarks = await window.bridgefile.bookmarks.getAll();
+      setBookmarks(allBookmarks);
+    } catch {
+      // Silently ignore load errors
+    }
+  }, []);
+
+  useEffect(() => {
+    loadBookmarks();
+  }, [loadBookmarks]);
+
+  const handleAddBookmark = async () => {
     if (!currentPath) return;
     // Don't add duplicates
     if (bookmarks.some(b => b.path === currentPath)) return;
 
     const name = currentPath.split('/').filter(Boolean).pop() || '/';
-    const newBookmark: BookmarkItem = {
-      id: Date.now().toString(),
-      connectionId: 'current',
-      path: currentPath,
-      name,
-      createdAt: Date.now(),
-    };
-    setBookmarks(prev => [...prev, newBookmark]);
+
+    if (isElectron()) {
+      try {
+        const newBookmark = await window.bridgefile.bookmarks.add({
+          connectionId: connectionId || 'current',
+          path: currentPath,
+          name,
+        });
+        setBookmarks(prev => [...prev, newBookmark]);
+      } catch {
+        // Silently ignore add errors
+      }
+    } else {
+      const newBookmark: BookmarkItem = {
+        id: Date.now().toString(),
+        connectionId: connectionId || 'current',
+        path: currentPath,
+        name,
+        createdAt: Date.now(),
+      };
+      setBookmarks(prev => [...prev, newBookmark]);
+    }
   };
 
-  const handleRemove = (id: string) => {
+  const handleRemove = async (id: string) => {
+    if (isElectron()) {
+      try {
+        await window.bridgefile.bookmarks.delete(id);
+      } catch {
+        // Silently ignore delete errors
+      }
+    }
     setBookmarks(prev => prev.filter(b => b.id !== id));
   };
 
