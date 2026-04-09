@@ -223,6 +223,113 @@ export async function del(connId: string, targetPath: string): Promise<void> {
   await client.remove(targetPath);
 }
 
+// ── Transfer Resume ────────────────────────────────────────────
+
+export async function resumeTransfer(
+  connId: string,
+  direction: 'upload' | 'download',
+  localPath: string,
+  remotePath: string,
+  onProgress?: (transferred: number, total: number) => void,
+): Promise<void> {
+  if (direction === 'upload') {
+    return resumeUpload(connId, localPath, remotePath, onProgress);
+  } else {
+    return resumeDownload(connId, remotePath, localPath, onProgress);
+  }
+}
+
+async function resumeUpload(
+  connId: string,
+  localPath: string,
+  remotePath: string,
+  onProgress?: (transferred: number, total: number) => void,
+): Promise<void> {
+  const { client } = getConn(connId);
+  const fileStat = fs.statSync(localPath);
+  const total = fileStat.size;
+
+  // Check remote file size for resume
+  let remoteSize = 0;
+  try {
+    remoteSize = await client.size(remotePath);
+  } catch {
+    // File doesn't exist remotely — start from 0
+  }
+
+  if (remoteSize >= total) {
+    onProgress?.(total, total);
+    return;
+  }
+
+  if (onProgress) {
+    client.trackProgress((info) => {
+      onProgress(remoteSize + info.bytes, total);
+    });
+  }
+
+  try {
+    if (remoteSize > 0) {
+      // Use appendFrom for resume -- basic-ftp uses APPE command
+      const stream = fs.createReadStream(localPath, { start: remoteSize });
+      await client.appendFrom(stream, remotePath);
+    } else {
+      await client.uploadFrom(localPath, remotePath);
+    }
+  } finally {
+    client.trackProgress();
+  }
+}
+
+async function resumeDownload(
+  connId: string,
+  remotePath: string,
+  localPath: string,
+  onProgress?: (transferred: number, total: number) => void,
+): Promise<void> {
+  const { client } = getConn(connId);
+
+  // Get remote file size
+  let total = 0;
+  try {
+    total = await client.size(remotePath);
+  } catch {
+    // Fall back to non-resume download
+    return download(connId, remotePath, localPath, onProgress);
+  }
+
+  // Check local file size for resume
+  let localSize = 0;
+  try {
+    const localStat = fs.statSync(localPath);
+    localSize = localStat.size;
+  } catch {
+    // File doesn't exist locally — start from 0
+  }
+
+  if (localSize >= total) {
+    onProgress?.(total, total);
+    return;
+  }
+
+  // Ensure local directory exists
+  const dir = path.dirname(localPath);
+  fs.mkdirSync(dir, { recursive: true });
+
+  if (onProgress) {
+    client.trackProgress((info) => {
+      onProgress(localSize + info.bytes, total);
+    });
+  }
+
+  try {
+    const stream = fs.createWriteStream(localPath, { flags: localSize > 0 ? 'a' : 'w' });
+    await client.downloadTo(stream, remotePath, localSize);
+  } finally {
+    client.trackProgress();
+  }
+}
+
 // ── Recursive directory operations ─────────────────────────────
 
 export async function uploadDir(

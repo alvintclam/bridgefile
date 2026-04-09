@@ -30,6 +30,14 @@ const api = {
       ipcRenderer.invoke('sftp:downloadDir', connId, remoteDir, localDir),
     deleteDir: (connId: string, dirPath: string) =>
       ipcRenderer.invoke('sftp:deleteDir', connId, dirPath),
+    chmod: (connId: string, path: string, mode: number) =>
+      ipcRenderer.invoke('sftp:chmod', connId, path, mode),
+    resumeTransfer: (
+      connId: string,
+      direction: 'upload' | 'download',
+      localPath: string,
+      remotePath: string,
+    ) => ipcRenderer.invoke('sftp:resumeTransfer', connId, direction, localPath, remotePath),
   },
 
   // ── FTP ──────────────────────────────────────────────────────
@@ -52,6 +60,12 @@ const api = {
       ipcRenderer.invoke('ftp:downloadDir', connId, remoteDir, localDir),
     deleteDir: (connId: string, dirPath: string) =>
       ipcRenderer.invoke('ftp:deleteDir', connId, dirPath),
+    resumeTransfer: (
+      connId: string,
+      direction: 'upload' | 'download',
+      localPath: string,
+      remotePath: string,
+    ) => ipcRenderer.invoke('ftp:resumeTransfer', connId, direction, localPath, remotePath),
   },
 
   // ── S3 ─────────────────────────────────────────────────────

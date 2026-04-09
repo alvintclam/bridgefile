@@ -1,6 +1,8 @@
-import React, { useState, useEffect, useRef, useCallback } from 'react';
+import React, { useState, useEffect, useRef, useCallback, useMemo } from 'react';
+import SpeedIndicator from './SpeedIndicator';
+import type { SpeedLimit } from './SpeedIndicator';
 
-export type TransferStatus = 'queued' | 'transferring' | 'completed' | 'failed';
+export type TransferStatus = 'queued' | 'transferring' | 'completed' | 'failed' | 'paused';
 
 export interface TransferItem {
   id: string;
@@ -135,17 +137,30 @@ function formatETA(remaining: number, speed: number): string {
   return `${Math.floor(secs / 3600)}h ${Math.ceil((secs % 3600) / 60)}m`;
 }
 
+function formatElapsed(ms: number): string {
+  const secs = Math.floor(ms / 1000);
+  if (secs < 60) return `${secs}s`;
+  if (secs < 3600) return `${Math.floor(secs / 60)}m ${secs % 60}s`;
+  return `${Math.floor(secs / 3600)}h ${Math.floor((secs % 3600) / 60)}m`;
+}
+
 const STATUS_STYLES: Record<TransferStatus, string> = {
   queued: 'bg-[#71717a]/15 text-[#71717a]',
   transferring: 'bg-[#3b82f6]/15 text-[#3b82f6]',
   completed: 'bg-emerald-500/15 text-emerald-400',
   failed: 'bg-red-500/15 text-red-400',
+  paused: 'bg-amber-500/15 text-amber-400',
 };
 
 export default function TransferQueue() {
   const [transfers, setTransfers] = useState<TransferItem[]>(
     isElectron() ? [] : MOCK_TRANSFERS
   );
+  const [maxConcurrent, setMaxConcurrent] = useState(2);
+  const [allPaused, setAllPaused] = useState(false);
+  const [speedLimit, setSpeedLimit] = useState<SpeedLimit>('unlimited');
+  const [contextMenu, setContextMenu] = useState<{ x: number; y: number; id: string } | null>(null);
+  const [startTime] = useState(Date.now());
   const intervalRef = useRef<ReturnType<typeof setInterval> | null>(null);
 
   // Poll IPC for real transfer data
@@ -176,6 +191,14 @@ export default function TransferQueue() {
     };
   }, [fetchQueue]);
 
+  // Close context menu on click outside
+  useEffect(() => {
+    if (!contextMenu) return;
+    const handleClick = () => setContextMenu(null);
+    document.addEventListener('mousedown', handleClick);
+    return () => document.removeEventListener('mousedown', handleClick);
+  }, [contextMenu]);
+
   const clearCompleted = () => {
     setTransfers(prev => prev.filter(t => t.status !== 'completed'));
   };
@@ -184,7 +207,6 @@ export default function TransferQueue() {
     if (isElectron()) {
       try {
         await window.bridgefile.transfer.cancelTransfer(id);
-        // The next poll will update the list
       } catch {
         // Fall through to local removal
       }
@@ -196,7 +218,6 @@ export default function TransferQueue() {
     if (isElectron()) {
       try {
         await window.bridgefile.transfer.retryTransfer(id);
-        // The next poll will update the list
         return;
       } catch {
         // Fall through to local retry
@@ -209,35 +230,134 @@ export default function TransferQueue() {
     );
   };
 
+  const moveToTop = useCallback((id: string) => {
+    setTransfers(prev => {
+      const idx = prev.findIndex(t => t.id === id);
+      if (idx <= 0) return prev;
+      const item = prev[idx];
+      const rest = [...prev.slice(0, idx), ...prev.slice(idx + 1)];
+      // Insert after any currently transferring items
+      const firstQueued = rest.findIndex(t => t.status === 'queued');
+      if (firstQueued === -1) {
+        return [...rest, item];
+      }
+      return [...rest.slice(0, firstQueued), item, ...rest.slice(firstQueued)];
+    });
+    setContextMenu(null);
+  }, []);
+
+  const handlePauseAll = useCallback(() => {
+    setAllPaused(true);
+    setTransfers(prev =>
+      prev.map(t =>
+        t.status === 'queued' || t.status === 'transferring'
+          ? { ...t, status: 'paused' as TransferStatus }
+          : t
+      )
+    );
+  }, []);
+
+  const handleResumeAll = useCallback(() => {
+    setAllPaused(false);
+    setTransfers(prev =>
+      prev.map(t =>
+        t.status === 'paused'
+          ? { ...t, status: 'queued' as TransferStatus }
+          : t
+      )
+    );
+  }, []);
+
+  const handleContextMenu = useCallback((e: React.MouseEvent, id: string) => {
+    e.preventDefault();
+    setContextMenu({ x: e.clientX, y: e.clientY, id });
+  }, []);
+
+  // Stats
   const totalSize = transfers.reduce((a, t) => a + t.size, 0);
   const totalTransferred = transfers.reduce((a, t) => a + t.transferred, 0);
   const activeCount = transfers.filter(t => t.status === 'transferring').length;
   const completedCount = transfers.filter(t => t.status === 'completed').length;
+  const queuedCount = transfers.filter(t => t.status === 'queued').length;
+  const elapsedMs = Date.now() - startTime;
+  const avgSpeed = useMemo(() => {
+    const activeTransfers = transfers.filter(t => t.status === 'transferring');
+    if (activeTransfers.length === 0) return 0;
+    return activeTransfers.reduce((a, t) => a + t.speed, 0);
+  }, [transfers]);
 
   return (
     <div className="flex flex-col h-full">
-      {/* Summary bar */}
+      {/* Summary bar with SpeedIndicator */}
       <div className="flex items-center justify-between px-3 py-1.5 border-b border-[#1e1e2e]">
         <div className="flex items-center gap-3 text-[11px] text-[#71717a]">
           <span>{transfers.length} transfer{transfers.length !== 1 ? 's' : ''}</span>
           {activeCount > 0 && (
             <span className="text-[#3b82f6]">{activeCount} active</span>
           )}
+          {queuedCount > 0 && (
+            <span className="text-[#71717a]">{queuedCount} queued</span>
+          )}
           {completedCount > 0 && (
-            <span className="text-emerald-400">{completedCount} completed</span>
+            <span className="text-emerald-400">{completedCount} done</span>
           )}
           <span>
             {formatSize(totalTransferred)} / {formatSize(totalSize)}
           </span>
+          {activeCount > 0 && (
+            <>
+              <span>Elapsed: {formatElapsed(elapsedMs)}</span>
+              <span>Avg: {formatSpeed(avgSpeed)}</span>
+            </>
+          )}
         </div>
-        {completedCount > 0 && (
-          <button
-            onClick={clearCompleted}
-            className="text-[11px] text-[#71717a] hover:text-[#a1a1aa] transition-colors"
-          >
-            Clear completed
-          </button>
-        )}
+
+        <div className="flex items-center gap-2">
+          {/* Speed indicator */}
+          <SpeedIndicator speedLimit={speedLimit} onSpeedLimitChange={setSpeedLimit} />
+
+          {/* Max concurrent dropdown */}
+          <div className="flex items-center gap-1 text-[11px] text-[#71717a]">
+            <span>Max:</span>
+            <select
+              value={maxConcurrent}
+              onChange={(e) => setMaxConcurrent(Number(e.target.value))}
+              className="bg-[#0a0a0f] border border-[#1e1e2e] rounded text-[10px] text-[#a1a1aa] px-1 py-0.5 focus:outline-none focus:border-[#3b82f6]"
+            >
+              {[1, 2, 3, 4, 5].map(n => (
+                <option key={n} value={n}>{n}</option>
+              ))}
+            </select>
+          </div>
+
+          {/* Pause / Resume all */}
+          {allPaused ? (
+            <button
+              onClick={handleResumeAll}
+              className="px-2 py-0.5 text-[10px] rounded bg-emerald-500/10 text-emerald-400 hover:bg-emerald-500/20 border border-emerald-500/20 transition-colors"
+              title="Resume all transfers"
+            >
+              Resume all
+            </button>
+          ) : (
+            <button
+              onClick={handlePauseAll}
+              className="px-2 py-0.5 text-[10px] rounded bg-amber-500/10 text-amber-400 hover:bg-amber-500/20 border border-amber-500/20 transition-colors"
+              title="Pause all transfers"
+            >
+              Pause all
+            </button>
+          )}
+
+          {completedCount > 0 && (
+            <button
+              onClick={clearCompleted}
+              className="text-[11px] text-[#71717a] hover:text-[#a1a1aa] transition-colors"
+            >
+              Clear done
+            </button>
+          )}
+        </div>
       </div>
 
       {/* Total progress bar */}
@@ -264,6 +384,7 @@ export default function TransferQueue() {
             return (
               <div
                 key={t.id}
+                onContextMenu={(e) => handleContextMenu(e, t.id)}
                 className="flex items-center gap-3 px-3 py-2 border-b border-[#1e1e2e]/50 hover:bg-[#1a1a26]/50 transition-colors group"
               >
                 {/* Direction arrow */}
@@ -287,11 +408,15 @@ export default function TransferQueue() {
                   </div>
 
                   {/* Progress bar */}
-                  {(t.status === 'transferring' || t.status === 'queued') && (
+                  {(t.status === 'transferring' || t.status === 'queued' || t.status === 'paused') && (
                     <div className="h-1 bg-[#1e1e2e] rounded-full overflow-hidden mb-1">
                       <div
                         className={`h-full rounded-full transition-all duration-300 ${
-                          t.status === 'transferring' ? 'bg-[#3b82f6]' : 'bg-[#71717a]'
+                          t.status === 'transferring'
+                            ? 'bg-[#3b82f6]'
+                            : t.status === 'paused'
+                            ? 'bg-amber-500'
+                            : 'bg-[#71717a]'
                         }`}
                         style={{ width: `${progress}%` }}
                       />
@@ -329,7 +454,7 @@ export default function TransferQueue() {
                       </svg>
                     </button>
                   )}
-                  {(t.status === 'queued' || t.status === 'transferring') && (
+                  {(t.status === 'queued' || t.status === 'transferring' || t.status === 'paused') && (
                     <button
                       onClick={() => cancelTransfer(t.id)}
                       className="p-1 rounded text-[#71717a] hover:text-red-400 hover:bg-red-500/10 transition-colors"
@@ -346,6 +471,30 @@ export default function TransferQueue() {
           })
         )}
       </div>
+
+      {/* Context menu for priority */}
+      {contextMenu && (
+        <div
+          className="fixed z-50 bg-[#12121a] border border-[#1e1e2e] rounded-lg shadow-xl py-1 min-w-[140px]"
+          style={{ left: contextMenu.x, top: contextMenu.y }}
+        >
+          <button
+            onClick={() => moveToTop(contextMenu.id)}
+            className="w-full px-3 py-1.5 text-left text-[11px] text-[#a1a1aa] hover:bg-[#1a1a26] hover:text-[#e4e4e7] transition-colors"
+          >
+            Move to top
+          </button>
+          <button
+            onClick={() => {
+              cancelTransfer(contextMenu.id);
+              setContextMenu(null);
+            }}
+            className="w-full px-3 py-1.5 text-left text-[11px] text-red-400 hover:bg-red-500/10 transition-colors"
+          >
+            Cancel transfer
+          </button>
+        </div>
+      )}
     </div>
   );
 }

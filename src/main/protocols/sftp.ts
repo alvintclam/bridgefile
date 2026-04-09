@@ -476,6 +476,139 @@ export async function deleteDir(connId: string, dirPath: string): Promise<void> 
   });
 }
 
+// ── chmod ──────────────────────────────────────────────────────
+
+export async function chmod(connId: string, targetPath: string, mode: number): Promise<void> {
+  return withReconnect(connId, ({ sftp }) => {
+    return new Promise((resolve, reject) => {
+      sftp.chmod(targetPath, mode, (err) => {
+        if (err) return reject(new Error(`chmod failed: ${err.message}`));
+        resolve();
+      });
+    });
+  });
+}
+
+// ── Transfer Resume ────────────────────────────────────────────
+
+export async function resumeTransfer(
+  connId: string,
+  direction: 'upload' | 'download',
+  localPath: string,
+  remotePath: string,
+  onProgress?: (transferred: number, total: number) => void,
+): Promise<void> {
+  if (direction === 'upload') {
+    return resumeUpload(connId, localPath, remotePath, onProgress);
+  } else {
+    return resumeDownload(connId, remotePath, localPath, onProgress);
+  }
+}
+
+async function resumeUpload(
+  connId: string,
+  localPath: string,
+  remotePath: string,
+  onProgress?: (transferred: number, total: number) => void,
+): Promise<void> {
+  const fileStat = fs.statSync(localPath);
+  const total = fileStat.size;
+
+  // Check remote file size for resume
+  let remoteSize = 0;
+  try {
+    const remoteStat = await stat(connId, remotePath);
+    remoteSize = remoteStat.size;
+  } catch {
+    // File doesn't exist remotely — start from 0
+  }
+
+  if (remoteSize >= total) {
+    // Already fully uploaded
+    onProgress?.(total, total);
+    return;
+  }
+
+  return withReconnect(connId, ({ sftp }) => {
+    return new Promise((resolve, reject) => {
+      const readStream = fs.createReadStream(localPath, { start: remoteSize });
+      const writeStream = sftp.createWriteStream(remotePath, {
+        flags: remoteSize > 0 ? 'a' : 'w',
+      });
+      let transferred = remoteSize;
+
+      readStream.on('data', (chunk: Buffer) => {
+        transferred += chunk.length;
+        onProgress?.(transferred, total);
+      });
+
+      writeStream.on('close', () => resolve());
+      writeStream.on('error', (err: Error) =>
+        reject(new Error(`Resume upload failed: ${err.message}`)),
+      );
+      readStream.on('error', (err: Error) =>
+        reject(new Error(`Read failed: ${err.message}`)),
+      );
+
+      readStream.pipe(writeStream);
+    });
+  });
+}
+
+async function resumeDownload(
+  connId: string,
+  remotePath: string,
+  localPath: string,
+  onProgress?: (transferred: number, total: number) => void,
+): Promise<void> {
+  const remoteStat = await stat(connId, remotePath);
+  const total = remoteStat.size;
+
+  // Check local file size for resume
+  let localSize = 0;
+  try {
+    const localStat = fs.statSync(localPath);
+    localSize = localStat.size;
+  } catch {
+    // File doesn't exist locally — start from 0
+  }
+
+  if (localSize >= total) {
+    // Already fully downloaded
+    onProgress?.(total, total);
+    return;
+  }
+
+  // Ensure local directory exists
+  const dir = path.dirname(localPath);
+  fs.mkdirSync(dir, { recursive: true });
+
+  return withReconnect(connId, ({ sftp }) => {
+    return new Promise((resolve, reject) => {
+      const readStream = sftp.createReadStream(remotePath, { start: localSize });
+      const writeStream = fs.createWriteStream(localPath, {
+        flags: localSize > 0 ? 'a' : 'w',
+      });
+      let transferred = localSize;
+
+      readStream.on('data', (chunk: Buffer) => {
+        transferred += chunk.length;
+        onProgress?.(transferred, total);
+      });
+
+      writeStream.on('close', () => resolve());
+      writeStream.on('error', (err: Error) =>
+        reject(new Error(`Write failed: ${err.message}`)),
+      );
+      readStream.on('error', (err: Error) =>
+        reject(new Error(`Resume download failed: ${err.message}`)),
+      );
+
+      readStream.pipe(writeStream);
+    });
+  });
+}
+
 // ── Helpers ────────────────────────────────────────────────────
 
 function formatPermissions(mode: number): string {

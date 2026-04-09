@@ -6,62 +6,201 @@ import BookmarkBar from './components/BookmarkBar';
 import FilePane from './components/FilePane';
 import TransferQueue from './components/TransferQueue';
 import LogPanel from './components/LogPanel';
+import TabBar from './components/TabBar';
+import type { SessionTab } from './components/TabBar';
 
 type BottomTab = 'transfers' | 'log';
 
+let tabIdCounter = 0;
+function nextTabId(): string {
+  tabIdCounter += 1;
+  return `tab-${tabIdCounter}`;
+}
+
 export default function App() {
-  const [isConnected, setIsConnected] = useState(false);
-  const [protocol, setProtocol] = useState<'SFTP' | 'FTP' | 'S3' | null>(null);
-  const [connectionId, setConnectionId] = useState<string | null>(null);
+  // ── Multi-tab session state ─────────────────────────────────
+  const [tabs, setTabs] = useState<SessionTab[]>([]);
+  const [activeTabId, setActiveTabId] = useState<string | null>(null);
+
+  // Derive active tab's connection state
+  const activeTab = tabs.find((t) => t.id === activeTabId) ?? null;
+  const isConnected = activeTab !== null;
+  const protocol = activeTab?.protocol ?? null;
+  const connectionId = activeTab?.connectionId ?? null;
+  const host = activeTab?.name ?? null;
+  const remotePath = activeTab?.remotePath ?? null;
+
+  // ── Synchronized browsing ───────────────────────────────────
+  const [syncBrowsing, setSyncBrowsing] = useState(false);
+  const [localPath, setLocalPath] = useState<string | null>(null);
+
+  // ── UI state ────────────────────────────────────────────────
   const [theme, setTheme] = useState<'dark' | 'light'>('dark');
-  const [host, setHost] = useState<string | null>(null);
-  const [remotePath, setRemotePath] = useState<string | null>(null);
   const [showConnectionManager, setShowConnectionManager] = useState(false);
   const [bottomTab, setBottomTab] = useState<BottomTab>('transfers');
   const [bottomCollapsed, setBottomCollapsed] = useState(false);
   const [bottomHeight, setBottomHeight] = useState(220);
-  const [dividerPos, setDividerPos] = useState(50); // percentage for left pane
+  const [dividerPos, setDividerPos] = useState(50);
 
   const isDraggingBottom = useRef(false);
   const isDraggingDivider = useRef(false);
   const containerRef = useRef<HTMLDivElement>(null);
 
   const handleConnect = (profile: ConnectionProfile, connId: string) => {
-    setIsConnected(true);
-    setProtocol(profile.type);
-    setConnectionId(connId);
-    setHost(
-      profile.type === 'SFTP' || profile.type === 'FTP'
-        ? profile.host || null
-        : profile.bucket || null
-    );
-    setRemotePath('/');
+    const tabName =
+      profile.name ||
+      (profile.type === 'SFTP' || profile.type === 'FTP'
+        ? profile.host || 'Server'
+        : profile.bucket || 'Bucket');
+
+    const newTab: SessionTab = {
+      id: nextTabId(),
+      name: tabName,
+      protocol: profile.type,
+      connectionId: connId,
+      remotePath: '/',
+    };
+
+    setTabs((prev) => [...prev, newTab]);
+    setActiveTabId(newTab.id);
     setShowConnectionManager(false);
   };
 
   const handleDisconnect = () => {
+    if (!activeTab) return;
+
     // Call disconnect via IPC if in Electron
-    if (typeof window !== 'undefined' && window.bridgefile && connectionId && protocol) {
-      const proto = protocol.toLowerCase() as 'sftp' | 's3' | 'ftp';
+    if (typeof window !== 'undefined' && window.bridgefile && activeTab.connectionId) {
+      const proto = activeTab.protocol.toLowerCase() as 'sftp' | 's3' | 'ftp';
       const api = window.bridgefile[proto];
-      api.disconnect(connectionId).catch((err: unknown) => {
+      api.disconnect(activeTab.connectionId).catch((err: unknown) => {
         console.error('Disconnect error:', err);
       });
     }
-    setIsConnected(false);
-    setProtocol(null);
-    setConnectionId(null);
-    setHost(null);
-    setRemotePath(null);
+
+    // Remove the active tab
+    setTabs((prev) => prev.filter((t) => t.id !== activeTab.id));
+    setActiveTabId((prevId) => {
+      const remaining = tabs.filter((t) => t.id !== activeTab.id);
+      if (remaining.length === 0) return null;
+      // Select nearest tab
+      const idx = tabs.findIndex((t) => t.id === activeTab.id);
+      const nextIdx = Math.min(idx, remaining.length - 1);
+      return remaining[nextIdx]?.id ?? null;
+    });
   };
 
-  // Bottom panel resize
+  const handleCloseTab = useCallback(
+    (tabId: string) => {
+      const tab = tabs.find((t) => t.id === tabId);
+      if (!tab) return;
+
+      // Disconnect in background
+      if (typeof window !== 'undefined' && window.bridgefile && tab.connectionId) {
+        const proto = tab.protocol.toLowerCase() as 'sftp' | 's3' | 'ftp';
+        window.bridgefile[proto].disconnect(tab.connectionId).catch(() => {});
+      }
+
+      setTabs((prev) => {
+        const remaining = prev.filter((t) => t.id !== tabId);
+        if (tabId === activeTabId) {
+          const idx = prev.findIndex((t) => t.id === tabId);
+          const nextIdx = Math.min(idx, remaining.length - 1);
+          setActiveTabId(remaining[nextIdx]?.id ?? null);
+        }
+        return remaining;
+      });
+    },
+    [tabs, activeTabId],
+  );
+
+  const handleSelectTab = useCallback((tabId: string) => {
+    setActiveTabId(tabId);
+  }, []);
+
+  const handleNewTab = useCallback(() => {
+    setShowConnectionManager(true);
+  }, []);
+
+  const handleReorderTabs = useCallback((reordered: SessionTab[]) => {
+    setTabs(reordered);
+  }, []);
+
+  // Update remote path for active tab
+  const setRemotePath = useCallback(
+    (path: string) => {
+      if (!activeTabId) return;
+      setTabs((prev) =>
+        prev.map((t) => (t.id === activeTabId ? { ...t, remotePath: path } : t)),
+      );
+    },
+    [activeTabId],
+  );
+
+  // ── Synchronized browsing handlers ──────────────────────────
+
+  const handleLocalNavigate = useCallback(
+    (newLocalPath: string) => {
+      setLocalPath(newLocalPath);
+
+      if (syncBrowsing && activeTab && remotePath) {
+        // Extract the relative path segment navigated to
+        // e.g., if local goes from /Users/foo to /Users/foo/docs, relative = "docs"
+        // Then we apply the same relative path to remote
+        if (localPath) {
+          const localNorm = localPath.endsWith('/') ? localPath : localPath + '/';
+          if (newLocalPath.startsWith(localNorm)) {
+            const relative = newLocalPath.slice(localNorm.length);
+            if (relative) {
+              const newRemote = remotePath.endsWith('/')
+                ? remotePath + relative
+                : remotePath + '/' + relative;
+              setRemotePath(newRemote);
+            }
+          } else {
+            // Navigating up or to a completely different path
+            const segments = newLocalPath.split('/').filter(Boolean);
+            const lastSegment = segments[segments.length - 1];
+            if (lastSegment) {
+              const remoteBase = remotePath.endsWith('/')
+                ? remotePath
+                : remotePath.replace(/\/[^/]*$/, '/');
+              setRemotePath(remoteBase + lastSegment);
+            }
+          }
+        }
+      }
+    },
+    [syncBrowsing, activeTab, remotePath, localPath, setRemotePath],
+  );
+
+  const handleRemoteNavigate = useCallback(
+    (newRemotePath: string) => {
+      setRemotePath(newRemotePath);
+
+      if (syncBrowsing && localPath && remotePath) {
+        const remoteNorm = remotePath.endsWith('/') ? remotePath : remotePath + '/';
+        if (newRemotePath.startsWith(remoteNorm)) {
+          const relative = newRemotePath.slice(remoteNorm.length);
+          if (relative) {
+            const newLocal = localPath.endsWith('/')
+              ? localPath + relative
+              : localPath + '/' + relative;
+            setLocalPath(newLocal);
+          }
+        }
+      }
+    },
+    [syncBrowsing, localPath, remotePath, setRemotePath],
+  );
+
+  // ── Bottom panel resize ─────────────────────────────────────
+
   const handleBottomDragStart = useCallback((e: React.MouseEvent) => {
     e.preventDefault();
     isDraggingBottom.current = true;
   }, []);
 
-  // Divider (horizontal split) resize
   const handleDividerDragStart = useCallback((e: React.MouseEvent) => {
     e.preventDefault();
     isDraggingDivider.current = true;
@@ -96,7 +235,7 @@ export default function App() {
   }, [bottomCollapsed]);
 
   const toggleTheme = () => {
-    setTheme(prev => (prev === 'dark' ? 'light' : 'dark'));
+    setTheme((prev) => (prev === 'dark' ? 'light' : 'dark'));
   };
 
   // Derive the lowercase protocol for the remote pane
@@ -105,11 +244,13 @@ export default function App() {
     : undefined;
 
   return (
-    <div className={`flex flex-col h-screen select-none overflow-hidden ${
-      theme === 'light'
-        ? 'bg-[#f5f5f7] text-[#1a1a2e] light-theme'
-        : 'bg-[#0a0a0f] text-[#e4e4e7]'
-    }`}>
+    <div
+      className={`flex flex-col h-screen select-none overflow-hidden ${
+        theme === 'light'
+          ? 'bg-[#f5f5f7] text-[#1a1a2e] light-theme'
+          : 'bg-[#0a0a0f] text-[#e4e4e7]'
+      }`}
+    >
       {/* Top: Connection bar */}
       <ConnectionBar
         isConnected={isConnected}
@@ -121,6 +262,18 @@ export default function App() {
         onSettingsClick={() => {}}
         theme={theme}
         onToggleTheme={toggleTheme}
+        syncBrowsing={syncBrowsing}
+        onToggleSyncBrowsing={() => setSyncBrowsing((s) => !s)}
+      />
+
+      {/* Tab bar for multi-session tabs */}
+      <TabBar
+        tabs={tabs}
+        activeTabId={activeTabId}
+        onSelectTab={handleSelectTab}
+        onCloseTab={handleCloseTab}
+        onNewTab={handleNewTab}
+        onReorder={handleReorderTabs}
       />
 
       {/* Bookmark bar */}
@@ -131,13 +284,15 @@ export default function App() {
       />
 
       {/* Middle: Dual pane file browsers */}
-      <div
-        ref={containerRef}
-        className="flex-1 flex min-h-0"
-      >
+      <div ref={containerRef} className="flex-1 flex min-h-0">
         {/* Local pane */}
         <div style={{ width: `${dividerPos}%` }} className="min-w-0">
-          <FilePane side="local" label="Local" />
+          <FilePane
+            side="local"
+            label="Local"
+            onNavigate={handleLocalNavigate}
+            syncPath={syncBrowsing ? localPath ?? undefined : undefined}
+          />
         </div>
 
         {/* Vertical divider */}
@@ -155,6 +310,8 @@ export default function App() {
             label="Remote"
             protocol={remoteProtocol}
             connectionId={connectionId ?? undefined}
+            onNavigate={handleRemoteNavigate}
+            syncPath={syncBrowsing ? remotePath ?? undefined : undefined}
           />
         </div>
       </div>
@@ -177,7 +334,7 @@ export default function App() {
         {/* Tab bar */}
         <div className="flex items-center justify-between px-2 h-8 shrink-0 border-b border-[#1e1e2e]">
           <div className="flex items-center gap-1">
-            <TabButton
+            <BottomTabButton
               active={bottomTab === 'transfers'}
               onClick={() => {
                 setBottomTab('transfers');
@@ -186,7 +343,7 @@ export default function App() {
               label="Transfers"
               badge={5}
             />
-            <TabButton
+            <BottomTabButton
               active={bottomTab === 'log'}
               onClick={() => {
                 setBottomTab('log');
@@ -198,7 +355,7 @@ export default function App() {
 
           {/* Collapse toggle */}
           <button
-            onClick={() => setBottomCollapsed(c => !c)}
+            onClick={() => setBottomCollapsed((c) => !c)}
             className="p-1 rounded text-[#71717a] hover:text-[#a1a1aa] hover:bg-[#1a1a26] transition-colors"
             title={bottomCollapsed ? 'Expand' : 'Collapse'}
           >
@@ -238,7 +395,7 @@ export default function App() {
   );
 }
 
-function TabButton({
+function BottomTabButton({
   active,
   onClick,
   label,

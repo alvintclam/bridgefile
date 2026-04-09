@@ -7,6 +7,10 @@ interface FilePaneProps {
   label: string;
   protocol?: 'sftp' | 's3' | 'ftp';
   connectionId?: string;
+  /** Called when the user navigates to a new path (for synchronized browsing) */
+  onNavigate?: (path: string) => void;
+  /** When set, the pane should attempt to navigate to this path (from sync) */
+  syncPath?: string;
 }
 
 type SortField = 'name' | 'size' | 'modified';
@@ -38,19 +42,28 @@ interface MultiFileProgress {
 
 const DRAG_DATA_KEY = 'application/x-bridgefile-transfer';
 
-export default function FilePane({ side, label, protocol, connectionId }: FilePaneProps) {
+export default function FilePane({ side, label, protocol, connectionId, onNavigate, syncPath }: FilePaneProps) {
   const params: FileOperationsParams = { side, protocol, connectionId };
   const ops = useFileOperations(params);
   const {
     files,
     currentPath,
     loading,
-    navigate,
+    navigate: rawNavigate,
     mkdir,
     rename,
     deleteFiles,
     refresh,
   } = ops;
+
+  // Wrap navigate to also call onNavigate for synchronized browsing
+  const navigate = useCallback(
+    (path: string) => {
+      rawNavigate(path);
+      onNavigate?.(path);
+    },
+    [rawNavigate, onNavigate],
+  );
 
   const [sortField, setSortField] = useState<SortField>('name');
   const [sortDir, setSortDir] = useState<SortDirection>('asc');

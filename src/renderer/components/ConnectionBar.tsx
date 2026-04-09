@@ -10,6 +10,8 @@ interface ConnectionBarProps {
   onSettingsClick: () => void;
   theme?: 'dark' | 'light';
   onToggleTheme?: () => void;
+  syncBrowsing?: boolean;
+  onToggleSyncBrowsing?: () => void;
 }
 
 export default function ConnectionBar({
@@ -22,6 +24,8 @@ export default function ConnectionBar({
   onSettingsClick,
   theme = 'dark',
   onToggleTheme,
+  syncBrowsing = false,
+  onToggleSyncBrowsing,
 }: ConnectionBarProps) {
   return (
     <div className="flex items-center justify-between h-11 px-3 bg-[#12121a] border-b border-[#1e1e2e] select-none shrink-0">
@@ -117,6 +121,29 @@ export default function ConnectionBar({
             className="px-2.5 py-1 text-xs rounded bg-[#3b82f6] text-white hover:bg-[#2563eb] transition-colors"
           >
             Connect
+          </button>
+        )}
+
+        {/* Sync browsing toggle */}
+        {onToggleSyncBrowsing && (
+          <button
+            onClick={onToggleSyncBrowsing}
+            className={`p-1.5 rounded transition-colors ${
+              syncBrowsing
+                ? 'text-[#3b82f6] bg-[#3b82f6]/10'
+                : 'text-[#71717a] hover:text-[#a1a1aa] hover:bg-[#1a1a26]'
+            }`}
+            title={syncBrowsing ? 'Disable synchronized browsing' : 'Enable synchronized browsing'}
+          >
+            <svg width="15" height="15" viewBox="0 0 24 24" fill="none">
+              <path
+                d="M4 4v5h.582m15.356 2A8.001 8.001 0 004.582 9m0 0H9m11 11v-5h-.581m0 0a8.003 8.003 0 01-15.357-2m15.357 2H15"
+                stroke="currentColor"
+                strokeWidth="1.5"
+                strokeLinecap="round"
+                strokeLinejoin="round"
+              />
+            </svg>
           </button>
         )}
 

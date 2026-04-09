@@ -117,6 +117,13 @@ export interface IPCChannels {
   'sftp:uploadDir': (connId: string, localDir: string, remoteDir: string) => void;
   'sftp:downloadDir': (connId: string, remoteDir: string, localDir: string) => void;
   'sftp:deleteDir': (connId: string, dirPath: string) => void;
+  'sftp:chmod': (connId: string, path: string, mode: number) => void;
+  'sftp:resumeTransfer': (
+    connId: string,
+    direction: 'upload' | 'download',
+    localPath: string,
+    remotePath: string,
+  ) => string;
 
   // FTP
   'ftp:connect': (config: FTPConfig) => string;
@@ -130,6 +137,12 @@ export interface IPCChannels {
   'ftp:uploadDir': (connId: string, localDir: string, remoteDir: string) => void;
   'ftp:downloadDir': (connId: string, remoteDir: string, localDir: string) => void;
   'ftp:deleteDir': (connId: string, dirPath: string) => void;
+  'ftp:resumeTransfer': (
+    connId: string,
+    direction: 'upload' | 'download',
+    localPath: string,
+    remotePath: string,
+  ) => string;
 
   // S3
   's3:connect': (config: S3Config) => string;

@@ -180,6 +180,64 @@ export function registerIPCHandlers(): void {
     },
   );
 
+  ipcMain.handle(
+    'sftp:chmod',
+    async (_event, connId: string, targetPath: string, mode: number) => {
+      return sftpClient.chmod(connId, targetPath, mode);
+    },
+  );
+
+  ipcMain.handle(
+    'sftp:resumeTransfer',
+    async (
+      _event,
+      connId: string,
+      direction: 'upload' | 'download',
+      localPath: string,
+      remotePath: string,
+    ) => {
+      const id = crypto.randomUUID();
+      const fileName = path.basename(direction === 'upload' ? localPath : remotePath);
+
+      let size = 0;
+      try {
+        if (direction === 'upload') {
+          size = fs.statSync(localPath).size;
+        }
+      } catch { /* will be resolved during transfer */ }
+
+      const transfer: TransferItem = {
+        id,
+        connectionId: connId,
+        direction,
+        localPath,
+        remotePath,
+        fileName,
+        size,
+        transferred: 0,
+        status: 'in-progress',
+        startedAt: Date.now(),
+      };
+      addTransfer(transfer);
+
+      sftpClient
+        .resumeTransfer(connId, direction, localPath, remotePath, (transferred, total) => {
+          transfer.transferred = transferred;
+          transfer.size = total;
+        })
+        .then(() => {
+          transfer.status = 'completed';
+          transfer.completedAt = Date.now();
+        })
+        .catch((err) => {
+          transfer.status = 'failed';
+          transfer.error = err.message;
+        });
+
+      return id;
+    },
+  );
+
   // ── FTP ──────────────────────────────────────────────────────
 
   ipcMain.handle('ftp:connect', async (_event, config) => {
@@ -304,6 +362,57 @@ export function registerIPCHandlers(): void {
     'ftp:deleteDir',
     async (_event, connId: string, dirPath: string) => {
       return ftpClient.deleteDir(connId, dirPath);
+    },
+  );
+
+  ipcMain.handle(
+    'ftp:resumeTransfer',
+    async (
+      _event,
+      connId: string,
+      direction: 'upload' | 'download',
+      localPath: string,
+      remotePath: string,
+    ) => {
+      const id = crypto.randomUUID();
+      const fileName = path.basename(direction === 'upload' ? localPath : remotePath);
+
+      let size = 0;
+      try {
+        if (direction === 'upload') {
+          size = fs.statSync(localPath).size;
+        }
+      } catch { /* will be resolved during transfer */ }
+
+      const transfer: TransferItem = {
+        id,
+        connectionId: connId,
+        direction,
+        localPath,
+        remotePath,
+        fileName,
+        size,
+        transferred: 0,
+        status: 'in-progress',
+        startedAt: Date.now(),
+      };
+      addTransfer(transfer);
+
+      ftpClient
+        .resumeTransfer(connId, direction, localPath, remotePath, (transferred, total) => {
+          transfer.transferred = transferred;
+          transfer.size = total;
+        })
+        .then(() => {
+          transfer.status = 'completed';
+          transfer.completedAt = Date.now();
+        })
+        .catch((err) => {
+          transfer.status = 'failed';
+          transfer.error = err.message;
+        });
+
+      return id;
     },
   );
 
