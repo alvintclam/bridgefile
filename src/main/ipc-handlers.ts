@@ -1,0 +1,459 @@
+import { ipcMain, app } from 'electron';
+import * as os from 'os';
+import * as fs from 'fs';
+import * as path from 'path';
+import * as sftpClient from './protocols/sftp';
+import * as ftpClient from './protocols/ftp';
+import * as s3Client from './protocols/s3';
+import * as store from './store';
+import type { FileEntry, TransferItem } from '../shared/types';
+
+// ── In-memory transfer queue ───────────────────────────────────
+
+const transferQueue: TransferItem[] = [];
+
+function addTransfer(item: TransferItem): void {
+  transferQueue.push(item);
+  // Keep queue bounded — remove completed items beyond 200
+  const completed = transferQueue.filter(
+    (t) => t.status === 'completed' || t.status === 'cancelled',
+  );
+  if (completed.length > 200) {
+    const toRemove = completed.slice(0, completed.length - 200);
+    for (const t of toRemove) {
+      const idx = transferQueue.indexOf(t);
+      if (idx >= 0) transferQueue.splice(idx, 1);
+    }
+  }
+}
+
+// ── Register all IPC handlers ──────────────────────────────────
+
+export function registerIPCHandlers(): void {
+  // ── Connection profiles ────────────────────────────────────
+
+  ipcMain.handle('connections:getAll', async () => {
+    return store.getAllProfiles();
+  });
+
+  ipcMain.handle('connections:getById', async (_event, id: string) => {
+    return store.getProfileById(id);
+  });
+
+  ipcMain.handle('connections:save', async (_event, profile) => {
+    return store.saveProfile(profile);
+  });
+
+  ipcMain.handle('connections:delete', async (_event, id: string) => {
+    return store.deleteProfile(id);
+  });
+
+  // ── SFTP ───────────────────────────────────────────────────
+
+  ipcMain.handle('sftp:connect', async (_event, config) => {
+    return sftpClient.connect(config);
+  });
+
+  ipcMain.handle('sftp:disconnect', async (_event, connId: string) => {
+    return sftpClient.disconnect(connId);
+  });
+
+  ipcMain.handle('sftp:list', async (_event, connId: string, dirPath: string) => {
+    return sftpClient.list(connId, dirPath);
+  });
+
+  ipcMain.handle(
+    'sftp:upload',
+    async (_event, connId: string, localPath: string, remotePath: string) => {
+      const id = crypto.randomUUID();
+      const fileName = path.basename(localPath);
+      const stat = fs.statSync(localPath);
+
+      const transfer: TransferItem = {
+        id,
+        connectionId: connId,
+        direction: 'upload',
+        localPath,
+        remotePath,
+        fileName,
+        size: stat.size,
+        transferred: 0,
+        status: 'in-progress',
+        startedAt: Date.now(),
+      };
+      addTransfer(transfer);
+
+      // Run upload async — don't block the IPC reply
+      sftpClient
+        .upload(connId, localPath, remotePath, (transferred, total) => {
+          transfer.transferred = transferred;
+          transfer.size = total;
+        })
+        .then(() => {
+          transfer.status = 'completed';
+          transfer.completedAt = Date.now();
+        })
+        .catch((err) => {
+          transfer.status = 'failed';
+          transfer.error = err.message;
+        });
+
+      return id;
+    },
+  );
+
+  ipcMain.handle(
+    'sftp:download',
+    async (_event, connId: string, remotePath: string, localPath: string) => {
+      const id = crypto.randomUUID();
+      const fileName = path.basename(remotePath);
+
+      const transfer: TransferItem = {
+        id,
+        connectionId: connId,
+        direction: 'download',
+        localPath,
+        remotePath,
+        fileName,
+        size: 0,
+        transferred: 0,
+        status: 'in-progress',
+        startedAt: Date.now(),
+      };
+      addTransfer(transfer);
+
+      sftpClient
+        .download(connId, remotePath, localPath, (transferred, total) => {
+          transfer.transferred = transferred;
+          transfer.size = total;
+        })
+        .then(() => {
+          transfer.status = 'completed';
+          transfer.completedAt = Date.now();
+        })
+        .catch((err) => {
+          transfer.status = 'failed';
+          transfer.error = err.message;
+        });
+
+      return id;
+    },
+  );
+
+  ipcMain.handle('sftp:mkdir', async (_event, connId: string, dirPath: string) => {
+    return sftpClient.mkdir(connId, dirPath);
+  });
+
+  ipcMain.handle(
+    'sftp:rename',
+    async (_event, connId: string, oldPath: string, newPath: string) => {
+      return sftpClient.rename(connId, oldPath, newPath);
+    },
+  );
+
+  ipcMain.handle('sftp:delete', async (_event, connId: string, targetPath: string) => {
+    return sftpClient.del(connId, targetPath);
+  });
+
+  ipcMain.handle('sftp:stat', async (_event, connId: string, targetPath: string) => {
+    return sftpClient.stat(connId, targetPath);
+  });
+
+  // ── FTP ──────────────────────────────────────────────────────
+
+  ipcMain.handle('ftp:connect', async (_event, config) => {
+    return ftpClient.connect(config);
+  });
+
+  ipcMain.handle('ftp:disconnect', async (_event, connId: string) => {
+    return ftpClient.disconnect(connId);
+  });
+
+  ipcMain.handle('ftp:list', async (_event, connId: string, dirPath: string) => {
+    return ftpClient.list(connId, dirPath);
+  });
+
+  ipcMain.handle(
+    'ftp:upload',
+    async (_event, connId: string, localPath: string, remotePath: string) => {
+      const id = crypto.randomUUID();
+      const fileName = path.basename(localPath);
+      const stat = fs.statSync(localPath);
+
+      const transfer: TransferItem = {
+        id,
+        connectionId: connId,
+        direction: 'upload',
+        localPath,
+        remotePath,
+        fileName,
+        size: stat.size,
+        transferred: 0,
+        status: 'in-progress',
+        startedAt: Date.now(),
+      };
+      addTransfer(transfer);
+
+      ftpClient
+        .upload(connId, localPath, remotePath, (transferred, total) => {
+          transfer.transferred = transferred;
+          transfer.size = total;
+        })
+        .then(() => {
+          transfer.status = 'completed';
+          transfer.completedAt = Date.now();
+        })
+        .catch((err) => {
+          transfer.status = 'failed';
+          transfer.error = err.message;
+        });
+
+      return id;
+    },
+  );
+
+  ipcMain.handle(
+    'ftp:download',
+    async (_event, connId: string, remotePath: string, localPath: string) => {
+      const id = crypto.randomUUID();
+      const fileName = path.basename(remotePath);
+
+      const transfer: TransferItem = {
+        id,
+        connectionId: connId,
+        direction: 'download',
+        localPath,
+        remotePath,
+        fileName,
+        size: 0,
+        transferred: 0,
+        status: 'in-progress',
+        startedAt: Date.now(),
+      };
+      addTransfer(transfer);
+
+      ftpClient
+        .download(connId, remotePath, localPath, (transferred, total) => {
+          transfer.transferred = transferred;
+          transfer.size = total;
+        })
+        .then(() => {
+          transfer.status = 'completed';
+          transfer.completedAt = Date.now();
+        })
+        .catch((err) => {
+          transfer.status = 'failed';
+          transfer.error = err.message;
+        });
+
+      return id;
+    },
+  );
+
+  ipcMain.handle('ftp:mkdir', async (_event, connId: string, dirPath: string) => {
+    return ftpClient.mkdir(connId, dirPath);
+  });
+
+  ipcMain.handle(
+    'ftp:rename',
+    async (_event, connId: string, oldPath: string, newPath: string) => {
+      return ftpClient.rename(connId, oldPath, newPath);
+    },
+  );
+
+  ipcMain.handle('ftp:delete', async (_event, connId: string, targetPath: string) => {
+    return ftpClient.del(connId, targetPath);
+  });
+
+  // ── S3 ─────────────────────────────────────────────────────
+
+  ipcMain.handle('s3:connect', async (_event, config) => {
+    return s3Client.connect(config);
+  });
+
+  ipcMain.handle('s3:disconnect', async (_event, connId: string) => {
+    return s3Client.disconnect(connId);
+  });
+
+  ipcMain.handle('s3:list', async (_event, connId: string, dirPath: string) => {
+    return s3Client.list(connId, dirPath);
+  });
+
+  ipcMain.handle(
+    's3:upload',
+    async (_event, connId: string, localPath: string, remotePath: string) => {
+      const id = crypto.randomUUID();
+      const fileName = path.basename(localPath);
+      const stat = fs.statSync(localPath);
+
+      const transfer: TransferItem = {
+        id,
+        connectionId: connId,
+        direction: 'upload',
+        localPath,
+        remotePath,
+        fileName,
+        size: stat.size,
+        transferred: 0,
+        status: 'in-progress',
+        startedAt: Date.now(),
+      };
+      addTransfer(transfer);
+
+      s3Client
+        .upload(connId, localPath, remotePath, (transferred, total) => {
+          transfer.transferred = transferred;
+          transfer.size = total;
+        })
+        .then(() => {
+          transfer.status = 'completed';
+          transfer.completedAt = Date.now();
+        })
+        .catch((err) => {
+          transfer.status = 'failed';
+          transfer.error = err.message;
+        });
+
+      return id;
+    },
+  );
+
+  ipcMain.handle(
+    's3:download',
+    async (_event, connId: string, remotePath: string, localPath: string) => {
+      const id = crypto.randomUUID();
+      const fileName = path.basename(remotePath);
+
+      const transfer: TransferItem = {
+        id,
+        connectionId: connId,
+        direction: 'download',
+        localPath,
+        remotePath,
+        fileName,
+        size: 0,
+        transferred: 0,
+        status: 'in-progress',
+        startedAt: Date.now(),
+      };
+      addTransfer(transfer);
+
+      s3Client
+        .download(connId, remotePath, localPath, (transferred, total) => {
+          transfer.transferred = transferred;
+          transfer.size = total;
+        })
+        .then(() => {
+          transfer.status = 'completed';
+          transfer.completedAt = Date.now();
+        })
+        .catch((err) => {
+          transfer.status = 'failed';
+          transfer.error = err.message;
+        });
+
+      return id;
+    },
+  );
+
+  ipcMain.handle('s3:mkdir', async (_event, connId: string, dirPath: string) => {
+    return s3Client.mkdir(connId, dirPath);
+  });
+
+  ipcMain.handle(
+    's3:rename',
+    async (_event, connId: string, oldKey: string, newKey: string) => {
+      return s3Client.rename(connId, oldKey, newKey);
+    },
+  );
+
+  ipcMain.handle('s3:delete', async (_event, connId: string, key: string) => {
+    return s3Client.del(connId, key);
+  });
+
+  // ── Transfer queue ─────────────────────────────────────────
+
+  ipcMain.handle('transfer:getQueue', async () => {
+    return [...transferQueue];
+  });
+
+  ipcMain.handle('transfer:cancel', async (_event, transferId: string) => {
+    const t = transferQueue.find((item) => item.id === transferId);
+    if (t && (t.status === 'queued' || t.status === 'in-progress')) {
+      t.status = 'cancelled';
+    }
+  });
+
+  ipcMain.handle('transfer:retry', async (_event, transferId: string) => {
+    const t = transferQueue.find((item) => item.id === transferId);
+    if (t && t.status === 'failed') {
+      t.status = 'queued';
+      t.error = undefined;
+      t.transferred = 0;
+      // NOTE: actual retry logic would re-dispatch the transfer here.
+      // For now we just reset the status so the UI can trigger a new transfer.
+    }
+  });
+
+  // ── Local filesystem ───────────────────────────────────────
+
+  ipcMain.handle('fs:listLocal', async (_event, dirPath: string) => {
+    const entries = fs.readdirSync(dirPath, { withFileTypes: true });
+    const result: FileEntry[] = [];
+
+    for (const entry of entries) {
+      // Skip hidden files on Unix
+      if (entry.name.startsWith('.')) continue;
+
+      const fullPath = path.join(dirPath, entry.name);
+      try {
+        const stat = fs.statSync(fullPath);
+        result.push({
+          name: entry.name,
+          path: fullPath,
+          size: stat.size,
+          modifiedAt: stat.mtimeMs,
+          isDirectory: stat.isDirectory(),
+        });
+      } catch {
+        // Skip files we can't stat (permission errors, etc.)
+      }
+    }
+
+    // Directories first, then alphabetical
+    result.sort((a, b) => {
+      if (a.isDirectory !== b.isDirectory) return a.isDirectory ? -1 : 1;
+      return a.name.localeCompare(b.name);
+    });
+
+    return result;
+  });
+
+  ipcMain.handle('fs:getHomeDir', async () => {
+    return os.homedir();
+  });
+
+  // ── Bookmarks ─────────────────────────────────────────────
+
+  ipcMain.handle('bookmarks:getAll', async () => {
+    return store.getAllBookmarks();
+  });
+
+  ipcMain.handle('bookmarks:add', async (_event, bookmark) => {
+    return store.addBookmark(bookmark);
+  });
+
+  ipcMain.handle('bookmarks:delete', async (_event, id: string) => {
+    return store.deleteBookmark(id);
+  });
+
+  // ── App info ───────────────────────────────────────────────
+
+  ipcMain.handle('app:getVersion', async () => {
+    return app.getVersion();
+  });
+
+  ipcMain.handle('app:getPlatform', async () => {
+    return process.platform;
+  });
+}
