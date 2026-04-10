@@ -1,4 +1,6 @@
-import React, { useState } from 'react';
+import React, { useState, useEffect } from 'react';
+import { t } from '../lib/i18n';
+import { logConnection, logConnected, logError } from './LogPanel';
 
 export interface ConnectionProfile {
   id: string;
@@ -39,52 +41,6 @@ interface ConnectionManagerProps {
 }
 
 const DEFAULT_GROUPS = ['Production', 'Staging', 'Personal'];
-
-const MOCK_PROFILES: ConnectionProfile[] = [
-  {
-    id: '1',
-    name: 'Production Server',
-    type: 'SFTP',
-    favorite: true,
-    lastUsed: new Date('2026-04-08'),
-    host: '192.168.1.100',
-    port: 22,
-    username: 'deploy',
-    group: 'Production',
-  },
-  {
-    id: '2',
-    name: 'Staging Server',
-    type: 'SFTP',
-    favorite: false,
-    lastUsed: new Date('2026-04-05'),
-    host: 'staging.example.com',
-    port: 22,
-    username: 'ubuntu',
-    group: 'Staging',
-  },
-  {
-    id: '3',
-    name: 'Assets Bucket',
-    type: 'S3',
-    favorite: true,
-    lastUsed: new Date('2026-04-07'),
-    bucket: 'company-assets',
-    region: 'us-east-1',
-    group: 'Production',
-  },
-  {
-    id: '4',
-    name: 'Backups (MinIO)',
-    type: 'S3',
-    favorite: false,
-    lastUsed: new Date('2026-03-20'),
-    bucket: 'backups',
-    region: 'us-east-1',
-    endpoint: 'https://minio.internal:9000',
-    group: 'Personal',
-  },
-];
 
 const EMPTY_SFTP: Partial<ConnectionProfile> = {
   name: '',
@@ -139,7 +95,7 @@ export default function ConnectionManager({
   onClose,
   onConnect,
 }: ConnectionManagerProps) {
-  const [profiles, setProfiles] = useState<ConnectionProfile[]>(MOCK_PROFILES);
+  const [profiles, setProfiles] = useState<ConnectionProfile[]>([]);
   const [selectedId, setSelectedId] = useState<string | null>(null);
   const [activeTab, setActiveTab] = useState<'SFTP' | 'FTP' | 'S3'>('SFTP');
   const [formData, setFormData] = useState<Partial<ConnectionProfile>>(EMPTY_SFTP);
@@ -151,6 +107,26 @@ export default function ConnectionManager({
   const [collapsedGroups, setCollapsedGroups] = useState<Set<string>>(new Set());
   const [newGroupName, setNewGroupName] = useState<string | null>(null);
   const [dragProfileId, setDragProfileId] = useState<string | null>(null);
+
+  // Load real profiles from IPC on mount
+  const loadProfiles = async () => {
+    if (isElectron()) {
+      try {
+        const saved = await window.bridgefile.connections.getAll();
+        setProfiles(saved as unknown as ConnectionProfile[]);
+      } catch {
+        setProfiles([]);
+      }
+    } else {
+      setProfiles([]);
+    }
+  };
+
+  useEffect(() => {
+    if (isOpen) {
+      loadProfiles();
+    }
+  }, [isOpen]);
 
   if (!isOpen) return null;
 
@@ -185,7 +161,7 @@ export default function ConnectionManager({
     setConnectError(null);
   };
 
-  const handleSave = () => {
+  const handleSave = async () => {
     const newProfile: ConnectionProfile = {
       ...formData,
       id: selectedId || Date.now().toString(),
@@ -194,18 +170,42 @@ export default function ConnectionManager({
       favorite: formData.favorite || false,
     } as ConnectionProfile;
 
-    if (selectedId) {
-      setProfiles(prev => prev.map(p => (p.id === selectedId ? newProfile : p)));
+    if (isElectron()) {
+      try {
+        await window.bridgefile.connections.save(newProfile as any);
+        await loadProfiles();
+      } catch {
+        // Fallback to local state
+        if (selectedId) {
+          setProfiles(prev => prev.map(p => (p.id === selectedId ? newProfile : p)));
+        } else {
+          setProfiles(prev => [...prev, newProfile]);
+        }
+      }
     } else {
-      setProfiles(prev => [...prev, newProfile]);
+      if (selectedId) {
+        setProfiles(prev => prev.map(p => (p.id === selectedId ? newProfile : p)));
+      } else {
+        setProfiles(prev => [...prev, newProfile]);
+      }
     }
     setSelectedId(newProfile.id);
     setIsEditing(false);
   };
 
-  const handleDelete = () => {
+  const handleDelete = async () => {
     if (!selectedId) return;
-    setProfiles(prev => prev.filter(p => p.id !== selectedId));
+
+    if (isElectron()) {
+      try {
+        await window.bridgefile.connections.delete(selectedId);
+        await loadProfiles();
+      } catch {
+        setProfiles(prev => prev.filter(p => p.id !== selectedId));
+      }
+    } else {
+      setProfiles(prev => prev.filter(p => p.id !== selectedId));
+    }
     setSelectedId(null);
     setFormData(getEmptyForm(activeTab));
     setIsEditing(false);
@@ -222,12 +222,12 @@ export default function ConnectionManager({
     setConnectError(null);
 
     if (!isElectron()) {
-      // Not in Electron -- use a mock connectionId
-      onConnect(profile, 'mock-' + Date.now());
+      setConnectError('Desktop app required for connections');
       return;
     }
 
     setConnecting(true);
+    logConnection(profile.type, profile.host || profile.bucket || 'server', profile.username);
 
     try {
       let connId: string;
@@ -270,9 +270,11 @@ export default function ConnectionManager({
         });
       }
 
+      logConnected(profile.type, profile.host || profile.bucket || 'server', profile.username);
       onConnect(profile, connId);
     } catch (err: unknown) {
       const msg = err instanceof Error ? err.message : String(err);
+      logError(`Connection failed: ${msg}`);
       setConnectError(msg);
     } finally {
       setConnecting(false);
@@ -350,18 +352,18 @@ export default function ConnectionManager({
         {/* Left: Profile list */}
         <div className="w-56 border-r border-[#1e1e2e] flex flex-col">
           <div className="p-3 border-b border-[#1e1e2e]">
-            <h2 className="text-sm font-semibold text-[#e4e4e7] mb-2">Connections</h2>
+            <h2 className="text-sm font-semibold text-[#e4e4e7] mb-2">{t('connections')}</h2>
             <div className="flex gap-1">
               <button
                 onClick={handleNewConnection}
                 className="flex-1 px-2.5 py-1.5 text-xs rounded bg-[#3b82f6] text-white hover:bg-[#2563eb] transition-colors"
               >
-                + New
+                {t('new_connection')}
               </button>
               <button
                 onClick={() => setNewGroupName('')}
                 className="px-2 py-1.5 text-xs rounded text-[#a1a1aa] hover:bg-[#1a1a26] border border-[#1e1e2e] transition-colors"
-                title="New Group"
+                title={t('new_folder')}
               >
                 <svg width="12" height="12" viewBox="0 0 24 24" fill="none">
                   <path d="M22 19a2 2 0 01-2 2H4a2 2 0 01-2-2V5a2 2 0 012-2h5l2 3h9a2 2 0 012 2z" stroke="currentColor" strokeWidth="2" />
@@ -394,7 +396,7 @@ export default function ConnectionManager({
             {favorites.length > 0 && (
               <div className="px-3 pt-3">
                 <div className="text-[10px] uppercase tracking-wider text-[#71717a] mb-1.5 font-medium">
-                  Favorites
+                  {t('favorites')}
                 </div>
                 {favorites.map(p => (
                   <ProfileItem
@@ -454,7 +456,7 @@ export default function ConnectionManager({
             {ungrouped.length > 0 && (
               <div className="px-3 pt-3 pb-3">
                 <div className="text-[10px] uppercase tracking-wider text-[#71717a] mb-1.5 font-medium">
-                  Ungrouped
+                  {t('ungrouped')}
                 </div>
                 {ungrouped.map(p => (
                   <ProfileItem
@@ -523,7 +525,7 @@ export default function ConnectionManager({
             {/* Connection name */}
             <div className="mb-3">
               <label className="block text-[11px] text-[#71717a] mb-1 uppercase tracking-wide">
-                Connection Name
+                {t('connection_name')}
               </label>
               <input
                 type="text"
@@ -906,7 +908,7 @@ export default function ConnectionManager({
                   onClick={handleDelete}
                   className="px-3 py-1.5 text-xs rounded text-red-400 hover:bg-red-500/10 border border-red-500/20 transition-colors"
                 >
-                  Delete
+                  {t('delete')}
                 </button>
               )}
             </div>
@@ -915,13 +917,13 @@ export default function ConnectionManager({
                 onClick={onClose}
                 className="px-3 py-1.5 text-xs rounded text-[#a1a1aa] hover:bg-[#1a1a26] border border-[#1e1e2e] transition-colors"
               >
-                Cancel
+                {t('cancel')}
               </button>
               <button
                 onClick={handleSave}
                 className="px-3 py-1.5 text-xs rounded text-[#e4e4e7] hover:bg-[#1a1a26] border border-[#1e1e2e] transition-colors"
               >
-                Save
+                {t('save')}
               </button>
               <button
                 onClick={handleConnect}
@@ -932,7 +934,7 @@ export default function ConnectionManager({
                     : 'bg-[#3b82f6] text-white hover:bg-[#2563eb]'
                 }`}
               >
-                {connecting ? 'Connecting...' : 'Connect'}
+                {connecting ? t('connecting') : t('connect')}
               </button>
             </div>
           </div>

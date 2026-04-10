@@ -110,6 +110,7 @@ const api = {
   fs: {
     listLocal: (dirPath: string) => ipcRenderer.invoke('fs:listLocal', dirPath),
     getHomeDir: () => ipcRenderer.invoke('fs:getHomeDir'),
+    mkdir: (dirPath: string) => ipcRenderer.invoke('fs:mkdir', dirPath),
   },
 
   // ── Bookmarks ──────────────────────────────────────────────

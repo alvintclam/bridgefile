@@ -1,4 +1,5 @@
 import React from 'react';
+import { t } from '../lib/i18n';
 
 interface ConnectionBarProps {
   isConnected: boolean;
@@ -103,7 +104,7 @@ export default function ConnectionBar({
             }`}
           />
           <span className="text-[11px] text-[#71717a]">
-            {isConnected ? 'Connected' : 'Disconnected'}
+            {isConnected ? t('connected') : t('disconnected')}
           </span>
         </div>
 
@@ -113,14 +114,14 @@ export default function ConnectionBar({
             onClick={onDisconnect}
             className="px-2.5 py-1 text-xs rounded bg-red-500/10 text-red-400 hover:bg-red-500/20 border border-red-500/20 transition-colors"
           >
-            Disconnect
+            {t('disconnect')}
           </button>
         ) : (
           <button
             onClick={onConnectClick}
             className="px-2.5 py-1 text-xs rounded bg-[#3b82f6] text-white hover:bg-[#2563eb] transition-colors"
           >
-            Connect
+            {t('connect')}
           </button>
         )}
 

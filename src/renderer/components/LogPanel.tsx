@@ -1,4 +1,5 @@
 import React, { useState, useRef, useEffect, useCallback } from 'react';
+import { t } from '../lib/i18n';
 
 export type LogLevel = 'info' | 'success' | 'error' | 'warning';
 
@@ -210,13 +211,13 @@ export default function LogPanel() {
             onClick={exportLogs}
             className="text-[11px] text-[#71717a] hover:text-[#a1a1aa] transition-colors"
           >
-            Export
+            {t('export_logs')}
           </button>
           <button
             onClick={clearLogs}
             className="text-[11px] text-[#71717a] hover:text-[#a1a1aa] transition-colors"
           >
-            Clear
+            {t('clear')}
           </button>
         </div>
       </div>

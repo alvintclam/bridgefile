@@ -124,6 +124,12 @@ const translations: Record<Locale, Record<string, string>> = {
     'export_logs': 'Export Logs',
     'edit_file': 'Edit File',
     'chmod': 'Change Permissions',
+    'clear': 'Clear',
+    'clear_completed': 'Clear completed',
+    'no_transfers': 'No transfers',
+    'drop_files': 'Drop files here to transfer',
+    'compare_dirs': 'Compare directories',
+    'search_files': 'Search...',
   },
 
   'zh-TW': {
@@ -233,6 +239,12 @@ const translations: Record<Locale, Record<string, string>> = {
     'export_logs': '\u532f\u51fa\u8a18\u9304',
     'edit_file': '\u7de8\u8f2f\u6a94\u6848',
     'chmod': '\u8b8a\u66f4\u6b0a\u9650',
+    'clear': '\u6e05\u9664',
+    'clear_completed': '\u6e05\u9664\u5df2\u5b8c\u6210',
+    'no_transfers': '\u6c92\u6709\u50b3\u8f38',
+    'drop_files': '\u62d6\u66f3\u6a94\u6848\u4ee5\u50b3\u8f38',
+    'compare_dirs': '\u6bd4\u8f03\u8cc7\u6599\u593e',
+    'search_files': '\u641c\u5c0b...',
   },
 };
 

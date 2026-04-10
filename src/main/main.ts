@@ -1,6 +1,7 @@
 import { app, BrowserWindow } from 'electron';
 import * as path from 'path';
 import { registerIPCHandlers } from './ipc-handlers';
+import './auto-updater';
 
 const isDev = !app.isPackaged;
 

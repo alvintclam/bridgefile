@@ -14,20 +14,12 @@ interface BookmarkBarProps {
   onNavigate: (path: string) => void;
 }
 
-const MOCK_BOOKMARKS: BookmarkItem[] = [
-  { id: '1', connectionId: 'conn-1', path: '/var/www', name: 'www', createdAt: Date.now() - 86400000 },
-  { id: '2', connectionId: 'conn-1', path: '/home/deploy', name: 'deploy home', createdAt: Date.now() - 50000000 },
-  { id: '3', connectionId: 'conn-1', path: '/etc/nginx', name: 'nginx conf', createdAt: Date.now() - 30000000 },
-];
-
 function isElectron(): boolean {
   return typeof window !== 'undefined' && typeof window.bridgefile !== 'undefined';
 }
 
 export default function BookmarkBar({ currentPath, connectionId, onNavigate }: BookmarkBarProps) {
-  const [bookmarks, setBookmarks] = useState<BookmarkItem[]>(
-    isElectron() ? [] : MOCK_BOOKMARKS
-  );
+  const [bookmarks, setBookmarks] = useState<BookmarkItem[]>([]);
 
   // Load bookmarks from IPC on mount
   const loadBookmarks = useCallback(async () => {

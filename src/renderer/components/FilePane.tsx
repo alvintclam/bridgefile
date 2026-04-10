@@ -1,6 +1,8 @@
 import React, { useState, useMemo, useRef, useEffect, useCallback } from 'react';
 import { FileEntry, formatFileSize, formatDate, useFileOperations } from '../hooks/useFileOperations';
 import type { FileOperationsParams } from '../hooks/useFileOperations';
+import { t } from '../lib/i18n';
+import { isTextFile } from './FileEditor';
 
 interface FilePaneProps {
   side: 'local' | 'remote';
@@ -11,6 +13,12 @@ interface FilePaneProps {
   onNavigate?: (path: string) => void;
   /** When set, the pane should attempt to navigate to this path (from sync) */
   syncPath?: string;
+  /** Dialog callbacks */
+  onCompare?: () => void;
+  onSearch?: () => void;
+  onEditFile?: (file: { path: string; name: string; size: number }) => void;
+  onChecksum?: (file: { path: string; name: string }) => void;
+  onPermissions?: (file: { path: string; name: string; permissions: string }) => void;
 }
 
 type SortField = 'name' | 'size' | 'modified';
@@ -42,7 +50,7 @@ interface MultiFileProgress {
 
 const DRAG_DATA_KEY = 'application/x-bridgefile-transfer';
 
-export default function FilePane({ side, label, protocol, connectionId, onNavigate, syncPath }: FilePaneProps) {
+export default function FilePane({ side, label, protocol, connectionId, onNavigate, syncPath, onCompare, onSearch, onEditFile, onChecksum, onPermissions }: FilePaneProps) {
   const params: FileOperationsParams = { side, protocol, connectionId };
   const ops = useFileOperations(params);
   const {
@@ -210,6 +218,9 @@ export default function FilePane({ side, label, protocol, connectionId, onNaviga
           : `${currentPath}/${file.name}`;
       navigate(newPath);
       setSelected(new Set());
+    } else if (isTextFile(file.name) && onEditFile) {
+      const filePath = currentPath === '/' ? `/${file.name}` : `${currentPath}/${file.name}`;
+      onEditFile({ path: filePath, name: file.name, size: file.size });
     }
   };
 
@@ -549,7 +560,7 @@ export default function FilePane({ side, label, protocol, connectionId, onNaviga
       {/* Header: label + filter */}
       <div className="flex items-center gap-2 px-2 py-1.5 border-b border-[#1e1e2e] bg-[#12121a]">
         <span className="text-[11px] uppercase tracking-wider text-[#71717a] font-medium shrink-0">
-          {label}
+          {t(side === 'local' ? 'local' : 'remote')}
         </span>
         <div className="flex-1 relative">
           <input
@@ -557,7 +568,7 @@ export default function FilePane({ side, label, protocol, connectionId, onNaviga
             type="text"
             value={filter}
             onChange={e => setFilter(e.target.value)}
-            placeholder="Filter..."
+            placeholder={t('search') + '...'}
             className="w-full pl-6 pr-2 py-1 text-xs bg-[#0a0a0f] border border-[#1e1e2e] rounded text-[#e4e4e7] placeholder-[#71717a] focus:border-[#3b82f6] focus:outline-none transition-colors"
           />
           <svg
@@ -659,21 +670,21 @@ export default function FilePane({ side, label, protocol, connectionId, onNaviga
           className="flex items-center flex-1 min-w-0 hover:text-[#a1a1aa] transition-colors text-left"
           onClick={() => handleSort('name')}
         >
-          Name <SortIcon field="name" />
+          {t('name')} <SortIcon field="name" />
         </button>
         <button
           className="flex items-center w-20 shrink-0 hover:text-[#a1a1aa] transition-colors text-right justify-end"
           onClick={() => handleSort('size')}
         >
-          Size <SortIcon field="size" />
+          {t('size')} <SortIcon field="size" />
         </button>
         <button
           className="flex items-center w-28 shrink-0 hover:text-[#a1a1aa] transition-colors text-right justify-end"
           onClick={() => handleSort('modified')}
         >
-          Modified <SortIcon field="modified" />
+          {t('modified')} <SortIcon field="modified" />
         </button>
-        <div className="w-20 shrink-0 text-right">Perms</div>
+        <div className="w-20 shrink-0 text-right">{t('permissions')}</div>
       </div>
 
       {/* File list */}
@@ -736,10 +747,10 @@ export default function FilePane({ side, label, protocol, connectionId, onNaviga
               />
             </svg>
             <span className="text-xs">
-              {filter ? 'No matching files' : 'No files'}
+              {t('no_files')}
             </span>
             <span className="text-[10px] text-[#4a4a5a]">
-              Drop files here to transfer
+              {t('drop_files')}
             </span>
           </div>
         ) : (
@@ -910,6 +921,41 @@ export default function FilePane({ side, label, protocol, connectionId, onNaviga
               setContextMenu(null);
             }}
             side={side}
+            onSearch={() => {
+              onSearch?.();
+              setContextMenu(null);
+            }}
+            onCompare={() => {
+              onCompare?.();
+              setContextMenu(null);
+            }}
+            onEditFile={contextMenu.file && !contextMenu.file.isDirectory && isTextFile(contextMenu.file.name)
+              ? () => {
+                  const file = contextMenu.file!;
+                  const filePath = currentPath === '/' ? `/${file.name}` : `${currentPath}/${file.name}`;
+                  onEditFile?.({ path: filePath, name: file.name, size: file.size });
+                  setContextMenu(null);
+                }
+              : undefined
+            }
+            onChecksum={contextMenu.file && !contextMenu.file.isDirectory
+              ? () => {
+                  const file = contextMenu.file!;
+                  const filePath = currentPath === '/' ? `/${file.name}` : `${currentPath}/${file.name}`;
+                  onChecksum?.({ path: filePath, name: file.name });
+                  setContextMenu(null);
+                }
+              : undefined
+            }
+            onPermissions={side === 'remote' && protocol === 'sftp' && contextMenu.file
+              ? () => {
+                  const file = contextMenu.file!;
+                  const filePath = currentPath === '/' ? `/${file.name}` : `${currentPath}/${file.name}`;
+                  onPermissions?.({ path: filePath, name: file.name, permissions: file.permissions });
+                  setContextMenu(null);
+                }
+              : undefined
+            }
           />
         )}
       </div>
@@ -1008,6 +1054,11 @@ function ContextMenu({
   onRefresh,
   onCopyPath,
   side,
+  onSearch,
+  onCompare,
+  onEditFile,
+  onChecksum,
+  onPermissions,
 }: {
   x: number;
   y: number;
@@ -1022,6 +1073,11 @@ function ContextMenu({
   onRefresh: () => void;
   onCopyPath: () => void;
   side: 'local' | 'remote';
+  onSearch?: () => void;
+  onCompare?: () => void;
+  onEditFile?: () => void;
+  onChecksum?: () => void;
+  onPermissions?: () => void;
 }) {
   const menuRef = useRef<HTMLDivElement>(null);
 
@@ -1082,26 +1138,41 @@ function ContextMenu({
       {file && (
         <>
           {file.isDirectory ? (
-            <MenuItem label="Open" shortcut="Enter" onClick={() => onOpen(file)} />
+            <MenuItem label={t('folder')} shortcut="Enter" onClick={() => onOpen(file)} />
           ) : null}
           <MenuItem
-            label={side === 'local' ? 'Upload' : 'Download'}
+            label={side === 'local' ? t('upload') : t('download')}
             onClick={onDownload}
           />
-          <MenuItem label="Rename" shortcut="F2" onClick={() => onRename(file)} />
-          <MenuItem label="Copy Path" onClick={onCopyPath} />
+          <MenuItem label={t('rename')} shortcut="F2" onClick={() => onRename(file)} />
+          <MenuItem label={t('copy')} onClick={onCopyPath} />
           <Divider />
         </>
       )}
-      <MenuItem label="New Folder" onClick={onNewFolder} />
-      <MenuItem label="Refresh" shortcut="F5" onClick={onRefresh} />
-      <MenuItem label="Select All" shortcut={navigator.platform?.includes('Mac') ? '\u2318A' : 'Ctrl+A'} onClick={() => {
+      <MenuItem label={t('new_folder')} onClick={onNewFolder} />
+      <MenuItem label={t('refresh')} shortcut="F5" onClick={onRefresh} />
+      {onSearch && (
+        <MenuItem label={t('search_files')} onClick={onSearch} />
+      )}
+      {onCompare && (
+        <MenuItem label={t('compare_dirs')} onClick={onCompare} />
+      )}
+      <MenuItem label={t('select_all')} shortcut={navigator.platform?.includes('Mac') ? '\u2318A' : 'Ctrl+A'} onClick={() => {
         // Handled by keyboard shortcuts
       }} disabled />
+      {onEditFile && (
+        <MenuItem label={t('edit_file')} onClick={onEditFile} />
+      )}
+      {onChecksum && (
+        <MenuItem label={t('checksum')} onClick={onChecksum} />
+      )}
+      {onPermissions && (
+        <MenuItem label={t('chmod')} onClick={onPermissions} />
+      )}
       {file && (
         <>
           <Divider />
-          <MenuItem label="Delete" shortcut="Del" onClick={onDelete} danger />
+          <MenuItem label={t('delete')} shortcut="Del" onClick={onDelete} danger />
         </>
       )}
     </div>

@@ -5,9 +5,14 @@ import type { ConnectionProfile } from './components/ConnectionManager';
 import BookmarkBar from './components/BookmarkBar';
 import FilePane from './components/FilePane';
 import TransferQueue from './components/TransferQueue';
-import LogPanel from './components/LogPanel';
+import LogPanel, { logConnected, logDisconnected, logError } from './components/LogPanel';
 import TabBar from './components/TabBar';
 import type { SessionTab } from './components/TabBar';
+import DirectoryCompare from './components/DirectoryCompare';
+import SearchDialog from './components/SearchDialog';
+import FileEditor from './components/FileEditor';
+import ChecksumDialog from './components/ChecksumDialog';
+import PermissionsDialog from './components/PermissionsDialog';
 
 type BottomTab = 'transfers' | 'log';
 
@@ -72,6 +77,14 @@ export default function App() {
   const [bottomHeight, setBottomHeight] = useState(220);
   const [dividerPos, setDividerPos] = useState(50);
 
+  // ── Dialog state ──────────────────────────────────────────────
+  const [showCompare, setShowCompare] = useState(false);
+  const [showSearch, setShowSearch] = useState(false);
+  const [showEditor, setShowEditor] = useState(false);
+  const [showChecksum, setShowChecksum] = useState(false);
+  const [showPermissions, setShowPermissions] = useState(false);
+  const [selectedFile, setSelectedFile] = useState<{ path: string; name: string; size?: number; permissions?: string } | null>(null);
+
   const isDraggingBottom = useRef(false);
   const isDraggingDivider = useRef(false);
   const containerRef = useRef<HTMLDivElement>(null);
@@ -91,6 +104,7 @@ export default function App() {
       remotePath: '/',
     };
 
+    logConnected(profile.type, profile.host || profile.bucket || 'server', profile.username);
     setTabs((prev) => [...prev, newTab]);
     setActiveTabId(newTab.id);
     setShowConnectionManager(false);
@@ -99,12 +113,14 @@ export default function App() {
   const handleDisconnect = () => {
     if (!activeTab) return;
 
+    logDisconnected(activeTab.name);
+
     // Call disconnect via IPC if in Electron
     if (typeof window !== 'undefined' && window.bridgefile && activeTab.connectionId) {
       const proto = activeTab.protocol.toLowerCase() as 'sftp' | 's3' | 'ftp';
       const api = window.bridgefile[proto];
       api.disconnect(activeTab.connectionId).catch((err: unknown) => {
-        console.error('Disconnect error:', err);
+        logError(`Disconnect error: ${err instanceof Error ? err.message : String(err)}`);
       });
     }
 
@@ -348,6 +364,9 @@ export default function App() {
             label="Local"
             onNavigate={handleLocalNavigate}
             syncPath={syncBrowsing ? localPath ?? undefined : undefined}
+            onCompare={() => setShowCompare(true)}
+            onSearch={() => setShowSearch(true)}
+            onChecksum={(file) => { setSelectedFile(file); setShowChecksum(true); }}
           />
         </div>
 
@@ -368,6 +387,11 @@ export default function App() {
             connectionId={connectionId ?? undefined}
             onNavigate={handleRemoteNavigate}
             syncPath={syncBrowsing ? remotePath ?? undefined : undefined}
+            onCompare={() => setShowCompare(true)}
+            onSearch={() => setShowSearch(true)}
+            onEditFile={(file) => { setSelectedFile(file); setShowEditor(true); }}
+            onChecksum={(file) => { setSelectedFile(file); setShowChecksum(true); }}
+            onPermissions={(file) => { setSelectedFile(file); setShowPermissions(true); }}
           />
         </div>
       </div>
@@ -447,6 +471,71 @@ export default function App() {
         onClose={() => setShowConnectionManager(false)}
         onConnect={handleConnect}
       />
+
+      {/* Directory Compare dialog */}
+      <DirectoryCompare
+        isOpen={showCompare}
+        onClose={() => setShowCompare(false)}
+        localPath={localPath ?? '/'}
+        remotePath={remotePath ?? '/'}
+        protocol={remoteProtocol}
+        connectionId={connectionId ?? undefined}
+      />
+
+      {/* Search dialog */}
+      <SearchDialog
+        isOpen={showSearch}
+        onClose={() => setShowSearch(false)}
+        protocol={remoteProtocol}
+        connectionId={connectionId ?? undefined}
+        currentPath={remotePath ?? '/'}
+        onNavigate={(path) => setRemotePath(path)}
+      />
+
+      {/* File Editor dialog */}
+      {showEditor && selectedFile && (
+        <FileEditor
+          isOpen={showEditor}
+          onClose={() => { setShowEditor(false); setSelectedFile(null); }}
+          protocol={remoteProtocol}
+          connectionId={connectionId ?? undefined}
+          remotePath={selectedFile.path}
+          fileName={selectedFile.name}
+          fileSize={selectedFile.size ?? 0}
+        />
+      )}
+
+      {/* Checksum dialog */}
+      {showChecksum && selectedFile && (
+        <ChecksumDialog
+          isOpen={showChecksum}
+          onClose={() => { setShowChecksum(false); setSelectedFile(null); }}
+          remotePath={selectedFile.path}
+          connectionId={connectionId ?? undefined}
+          fileName={selectedFile.name}
+        />
+      )}
+
+      {/* Permissions dialog */}
+      {showPermissions && selectedFile && connectionId && (
+        <PermissionsDialog
+          isOpen={showPermissions}
+          onClose={() => { setShowPermissions(false); setSelectedFile(null); }}
+          fileName={selectedFile.name}
+          currentPermissions={selectedFile.permissions}
+          connectionId={connectionId}
+          remotePath={selectedFile.path}
+          onApply={(mode: number) => {
+            if (connectionId) {
+              window.bridgefile.sftp.chmod(connectionId, selectedFile.path, mode).catch((err: unknown) => {
+                logError(`chmod failed: ${err instanceof Error ? err.message : String(err)}`);
+              });
+            }
+            setShowPermissions(false);
+            setSelectedFile(null);
+          }}
+        />
+      )}
     </div>
   );
 }

@@ -35,9 +35,8 @@ export default function SpeedIndicator({ speedLimit, onSpeedLimitChange }: Speed
   useEffect(() => {
     const poll = async () => {
       if (!isElectron()) {
-        // Mock data in browser mode
-        setUploadSpeed(2456000);
-        setDownloadSpeed(1234000);
+        setUploadSpeed(0);
+        setDownloadSpeed(0);
         return;
       }
 

@@ -607,6 +607,10 @@ export function registerIPCHandlers(): void {
     return os.homedir();
   });
 
+  ipcMain.handle('fs:mkdir', async (_event, dirPath: string) => {
+    fs.mkdirSync(dirPath, { recursive: true });
+  });
+
   // ── Bookmarks ─────────────────────────────────────────────
 
   ipcMain.handle('bookmarks:getAll', async () => {

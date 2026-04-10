@@ -1,6 +1,7 @@
 import React, { useState, useEffect, useRef, useCallback, useMemo } from 'react';
 import SpeedIndicator from './SpeedIndicator';
 import type { SpeedLimit } from './SpeedIndicator';
+import { t } from '../lib/i18n';
 
 export type TransferStatus = 'queued' | 'transferring' | 'completed' | 'failed' | 'paused';
 
@@ -14,55 +15,6 @@ export interface TransferItem {
   status: TransferStatus;
   error?: string;
 }
-
-const MOCK_TRANSFERS: TransferItem[] = [
-  {
-    id: '1',
-    filename: 'node-v24.13.0.tar.gz',
-    direction: 'upload',
-    size: 42893312,
-    transferred: 42893312,
-    speed: 0,
-    status: 'completed',
-  },
-  {
-    id: '2',
-    filename: 'design-mockup.fig',
-    direction: 'upload',
-    size: 15728640,
-    transferred: 8912345,
-    speed: 2456000,
-    status: 'transferring',
-  },
-  {
-    id: '3',
-    filename: 'db-2026-04-07.sql.gz',
-    direction: 'download',
-    size: 52428800,
-    transferred: 0,
-    speed: 0,
-    status: 'queued',
-  },
-  {
-    id: '4',
-    filename: 'auth.log',
-    direction: 'download',
-    size: 2097152,
-    transferred: 1048576,
-    speed: 0,
-    status: 'failed',
-    error: 'Connection timed out',
-  },
-  {
-    id: '5',
-    filename: 'report-q1.pdf',
-    direction: 'upload',
-    size: 2457600,
-    transferred: 2457600,
-    speed: 0,
-    status: 'completed',
-  },
-];
 
 function isElectron(): boolean {
   return typeof window !== 'undefined' && typeof window.bridgefile !== 'undefined';
@@ -153,9 +105,7 @@ const STATUS_STYLES: Record<TransferStatus, string> = {
 };
 
 export default function TransferQueue() {
-  const [transfers, setTransfers] = useState<TransferItem[]>(
-    isElectron() ? [] : MOCK_TRANSFERS
-  );
+  const [transfers, setTransfers] = useState<TransferItem[]>([]);
   const [maxConcurrent, setMaxConcurrent] = useState(2);
   const [allPaused, setAllPaused] = useState(false);
   const [speedLimit, setSpeedLimit] = useState<SpeedLimit>('unlimited');
@@ -291,7 +241,7 @@ export default function TransferQueue() {
       {/* Summary bar with SpeedIndicator */}
       <div className="flex items-center justify-between px-3 py-1.5 border-b border-[#1e1e2e]">
         <div className="flex items-center gap-3 text-[11px] text-[#71717a]">
-          <span>{transfers.length} transfer{transfers.length !== 1 ? 's' : ''}</span>
+          <span>{transfers.length} {t('transfers').toLowerCase()}</span>
           {activeCount > 0 && (
             <span className="text-[#3b82f6]">{activeCount} active</span>
           )}
@@ -354,7 +304,7 @@ export default function TransferQueue() {
               onClick={clearCompleted}
               className="text-[11px] text-[#71717a] hover:text-[#a1a1aa] transition-colors"
             >
-              Clear done
+              {t('clear_completed')}
             </button>
           )}
         </div>
@@ -374,7 +324,7 @@ export default function TransferQueue() {
       <div className="flex-1 overflow-y-auto">
         {transfers.length === 0 ? (
           <div className="flex items-center justify-center h-full text-[#71717a] text-xs">
-            No transfers
+            {t('no_transfers')}
           </div>
         ) : (
           transfers.map(t => {
