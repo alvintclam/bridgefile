@@ -537,17 +537,16 @@ export async function uploadDir(
   signal?: AbortSignal,
 ): Promise<void> {
   throwIfAborted(signal);
-  const { sftp } = getConn(connId);
 
-  // Ensure remote directory exists
-  await new Promise<void>((resolve, reject) => {
-    sftp.mkdir(remoteDir, (err) => {
-      if (err && (err as any).code !== 4) return reject(err); // code 4 = already exists
-      resolve();
-    });
-  });
+  // Ensure remote directory exists (using reconnect-safe mkdir)
+  try {
+    await mkdir(connId, remoteDir);
+  } catch (err: any) {
+    if (err && err.message && !err.message.includes('code 4') && !err.message.includes('already exists') && !err.message.includes('Failure')) {
+      throw err;
+    }
+  }
 
-  const entries = fs.readdirSync(localDir, { withFileTypes: true });
   const allFiles: { local: string; remote: string }[] = [];
 
   // Gather all files recursively
@@ -565,19 +564,20 @@ export async function uploadDir(
   };
   gather(localDir, remoteDir);
 
-  // Create all remote directories first
+  // Create all remote directories first (using reconnect-safe mkdir)
   const createDirs = async (localBase: string, remoteBase: string) => {
     throwIfAborted(signal);
     const items = fs.readdirSync(localBase, { withFileTypes: true });
     for (const item of items) {
       if (item.isDirectory()) {
         const remotePath = path.posix.join(remoteBase, item.name);
-        await new Promise<void>((resolve, reject) => {
-          sftp.mkdir(remotePath, (err) => {
-            if (err && (err as any).code !== 4) return reject(err);
-            resolve();
-          });
-        });
+        try {
+          await mkdir(connId, remotePath);
+        } catch (err: any) {
+          if (err && err.message && !err.message.includes('code 4') && !err.message.includes('already exists') && !err.message.includes('Failure')) {
+            throw err;
+          }
+        }
         await createDirs(path.join(localBase, item.name), remotePath);
       }
     }

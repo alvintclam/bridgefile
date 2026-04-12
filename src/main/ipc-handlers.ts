@@ -82,6 +82,8 @@ function startTransfer(transfer: TransferItem): void {
           ? s3Client.uploadDir(transfer.connectionId, transfer.localPath, transfer.remotePath, onDirectoryProgress, controller.signal)
           : s3Client.downloadDir(transfer.connectionId, transfer.remotePath, transfer.localPath, onDirectoryProgress, controller.signal);
         break;
+      default:
+        throw new Error(`Unsupported protocol: ${transfer.protocol}`);
     }
   } else {
     const onProgress = (transferred: number, total: number) => {
@@ -106,6 +108,8 @@ function startTransfer(transfer: TransferItem): void {
           ? s3Client.upload(transfer.connectionId, transfer.localPath, transfer.remotePath, onProgress, controller.signal)
           : s3Client.download(transfer.connectionId, transfer.remotePath, transfer.localPath, onProgress, controller.signal);
         break;
+      default:
+        throw new Error(`Unsupported protocol: ${transfer.protocol}`);
     }
   }
 

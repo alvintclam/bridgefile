@@ -56,7 +56,14 @@ function getProtocolApi(protocol: 'sftp' | 's3' | 'ftp') {
   return api.ftp;
 }
 
-function joinPath(base: string, name: string): string {
+export function isWindowsPath(p: string): boolean {
+  return /^[A-Za-z]:[\\/]/.test(p);
+}
+
+export function joinPath(base: string, name: string, side: 'local' | 'remote' = 'remote'): string {
+  if (side === 'local' && isWindowsPath(base)) {
+    return base.endsWith('\\') ? base + name : base + '\\' + name;
+  }
   if (base === '/') return '/' + name;
   return base + '/' + name;
 }
@@ -153,7 +160,7 @@ export function useFileOperations(params: FileOperationsParams): FileOperations 
       return;
     }
 
-    const fullPath = joinPath(currentPath, name);
+    const fullPath = joinPath(currentPath, name, side);
 
     (async () => {
       try {
@@ -187,8 +194,8 @@ export function useFileOperations(params: FileOperationsParams): FileOperations 
     (async () => {
       try {
         if (side === 'local') {
-          const oldPath = joinPath(currentPath, oldName);
-          const newPath = joinPath(currentPath, newName);
+          const oldPath = joinPath(currentPath, oldName, side);
+          const newPath = joinPath(currentPath, newName, side);
           await window.bridgefile.fs.rename(oldPath, newPath);
           loadFiles(currentPath);
           return;
@@ -197,8 +204,8 @@ export function useFileOperations(params: FileOperationsParams): FileOperations 
         const { connectionId: cid, protocol: proto } = connRef.current;
         if (!cid || !proto) return;
         const api = getProtocolApi(proto);
-        const oldPath = joinPath(currentPath, oldName);
-        const newPath = joinPath(currentPath, newName);
+        const oldPath = joinPath(currentPath, oldName, side);
+        const newPath = joinPath(currentPath, newName, side);
         await api.rename(cid, oldPath, newPath);
         loadFiles(currentPath);
       } catch (err: unknown) {
@@ -238,7 +245,7 @@ export function useFileOperations(params: FileOperationsParams): FileOperations 
       try {
         if (side === 'local') {
           for (const file of toDelete) {
-            await window.bridgefile.fs.delete(joinPath(currentPath, file.name));
+            await window.bridgefile.fs.delete(joinPath(currentPath, file.name, side));
           }
           loadFiles(currentPath);
           return;
@@ -248,7 +255,7 @@ export function useFileOperations(params: FileOperationsParams): FileOperations 
         if (!cid || !proto) return;
         const api = getProtocolApi(proto);
         for (const f of toDelete) {
-          const targetPath = joinPath(currentPath, f.name);
+          const targetPath = joinPath(currentPath, f.name, side);
           if (f.isDirectory) {
             await api.deleteDir(cid, targetPath);
           } else {

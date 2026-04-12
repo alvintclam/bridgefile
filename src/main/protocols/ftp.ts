@@ -261,21 +261,12 @@ export async function del(connId: string, targetPath: string): Promise<void> {
   const conn = getConn(connId);
   const serverTargetPath = resolveServerPath(conn, targetPath);
 
-  // Try to detect if target is a directory by listing it
+  // Try to detect if target is a directory by listing it.
+  // If list() succeeds, the path is a directory (listing a file throws).
   try {
-    const entries = await conn.client.list(serverTargetPath);
-    // If list succeeds without error and targetPath doesn't look like a file
-    // that just happened to have entries, treat it as a directory.
-    // basic-ftp's list on a file may return one entry; for a dir, the contents.
-    const isDir =
-      entries.length === 0 ||
-      entries.some((e) => e.name === '.' || e.name === '..') ||
-      entries.length > 1;
-
-    if (isDir) {
-      await conn.client.removeDir(serverTargetPath);
-      return;
-    }
+    await conn.client.list(serverTargetPath);
+    await conn.client.removeDir(serverTargetPath);
+    return;
   } catch {
     // list failed — it's a file (or doesn't exist)
   }

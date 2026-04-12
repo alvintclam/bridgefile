@@ -1,5 +1,5 @@
 import React, { useState, useMemo, useRef, useEffect, useCallback } from 'react';
-import { FileEntry, formatFileSize, formatDate, useFileOperations } from '../hooks/useFileOperations';
+import { FileEntry, formatFileSize, formatDate, useFileOperations, joinPath, isWindowsPath } from '../hooks/useFileOperations';
 import type { FileOperationsParams } from '../hooks/useFileOperations';
 import { t } from '../lib/i18n';
 import { isTextFile } from './FileEditor';
@@ -263,19 +263,25 @@ export default function FilePane({
 
   const handleDoubleClick = (file: FileEntry) => {
     if (file.isDirectory) {
-      const newPath =
-        currentPath === '/'
-          ? `/${file.name}`
-          : `${currentPath}/${file.name}`;
+      const newPath = joinPath(currentPath, file.name, side);
       navigate(newPath);
       setSelected(new Set());
     } else if (isTextFile(file.name) && onEditFile) {
-      const filePath = currentPath === '/' ? `/${file.name}` : `${currentPath}/${file.name}`;
+      const filePath = joinPath(currentPath, file.name, side);
       onEditFile({ path: filePath, name: file.name, size: file.size });
     }
   };
 
   const handleGoUp = () => {
+    if (side === 'local' && isWindowsPath(currentPath)) {
+      // Windows: C:\Users\foo -> C:\Users, C:\ stays as C:\
+      const parts = currentPath.split(/[\\/]/).filter(Boolean);
+      if (parts.length <= 1) return; // At drive root
+      parts.pop();
+      navigate(parts[0] + '\\' + parts.slice(1).join('\\'));
+      setSelected(new Set());
+      return;
+    }
     if (currentPath === '/') return;
     const parts = currentPath.split('/').filter(Boolean);
     parts.pop();
@@ -982,10 +988,7 @@ export default function FilePane({
             }}
             onCopyPath={() => {
               if (contextMenu.file) {
-                const fullPath =
-                  currentPath === '/'
-                    ? `/${contextMenu.file.name}`
-                    : `${currentPath}/${contextMenu.file.name}`;
+                const fullPath = joinPath(currentPath, contextMenu.file.name, side);
                 navigator.clipboard?.writeText(fullPath);
               }
               setContextMenu(null);
@@ -1002,7 +1005,7 @@ export default function FilePane({
             onEditFile={contextMenu.file && !contextMenu.file.isDirectory && isTextFile(contextMenu.file.name)
               ? () => {
                   const file = contextMenu.file!;
-                  const filePath = currentPath === '/' ? `/${file.name}` : `${currentPath}/${file.name}`;
+                  const filePath = joinPath(currentPath, file.name, side);
                   onEditFile?.({ path: filePath, name: file.name, size: file.size });
                   setContextMenu(null);
                 }
@@ -1011,7 +1014,7 @@ export default function FilePane({
             onChecksum={contextMenu.file && !contextMenu.file.isDirectory
               ? () => {
                   const file = contextMenu.file!;
-                  const filePath = currentPath === '/' ? `/${file.name}` : `${currentPath}/${file.name}`;
+                  const filePath = joinPath(currentPath, file.name, side);
                   onChecksum?.({ path: filePath, name: file.name });
                   setContextMenu(null);
                 }
@@ -1020,7 +1023,7 @@ export default function FilePane({
             onPermissions={side === 'remote' && protocol === 'sftp' && contextMenu.file
               ? () => {
                   const file = contextMenu.file!;
-                  const filePath = currentPath === '/' ? `/${file.name}` : `${currentPath}/${file.name}`;
+                  const filePath = joinPath(currentPath, file.name, side);
                   onPermissions?.({ path: filePath, name: file.name, permissions: file.permissions });
                   setContextMenu(null);
                 }

@@ -226,6 +226,7 @@ export async function upload(
   const total = stat.size;
 
   // For files under 100 MB, use simple PutObject with a stream
+  let transferred = 0;
   const sourceStream = fs.createReadStream(localPath);
   const throttle = createRateLimitedTransform((chunkBytes) => {
     transferred += chunkBytes;
@@ -238,8 +239,6 @@ export async function upload(
   });
   sourceStream.on('error', (error) => throttle.destroy(error));
   sourceStream.pipe(throttle);
-
-  let transferred = 0;
 
   try {
     await conn.client.send(
