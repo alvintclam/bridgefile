@@ -855,7 +855,7 @@ export function registerIPCHandlers(): void {
   });
 
   ipcMain.handle('transfer:setMaxConcurrent', async (_event, maxConcurrent: number) => {
-    const nextValue = Math.max(1, Math.min(10, Math.floor(maxConcurrent)));
+    const nextValue = Math.max(1, Math.min(64, Math.floor(maxConcurrent)));
     transferSettings.maxConcurrent = nextValue;
     scheduleTransfers();
     return transferSettings.maxConcurrent;

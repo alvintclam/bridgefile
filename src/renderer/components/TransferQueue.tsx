@@ -350,7 +350,7 @@ export default function TransferQueue() {
               onChange={(e) => handleMaxConcurrentChange(Number(e.target.value))}
               className="bg-[#0a0a0f] border border-[#1e1e2e] rounded text-[10px] text-[#a1a1aa] px-1 py-0.5 focus:outline-none focus:border-[#3b82f6]"
             >
-              {[1, 2, 3, 4, 5, 6, 7, 8, 9, 10].map(n => (
+              {[1, 2, 3, 4, 5, 8, 10, 16, 24, 32, 48, 64].map(n => (
                 <option key={n} value={n}>{n}</option>
               ))}
             </select>
