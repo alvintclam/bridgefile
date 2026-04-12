@@ -280,6 +280,9 @@ export async function upload(
   }
 }
 
+const S3_PARALLEL_THRESHOLD = 10 * 1024 * 1024; // 10 MB
+const S3_PARALLEL_CHUNKS = 4;
+
 export async function download(
   connId: string,
   remotePath: string,
@@ -291,31 +294,88 @@ export async function download(
   const conn = getConn(connId);
   const key = resolveKey(conn, remotePath);
 
-  let resp;
+  // First, get file size via HeadObject
+  let total: number;
   try {
-    resp = await conn.client.send(
-      new GetObjectCommand({
-        Bucket: conn.bucket,
-        Key: key,
-      }),
+    const headResp = await conn.client.send(
+      new HeadObjectCommand({ Bucket: conn.bucket, Key: key }),
     );
+    total = headResp.ContentLength ?? 0;
   } catch (err: any) {
     throw new Error(friendlyS3Error(err, conn.bucket));
   }
-
-  const total = resp.ContentLength ?? 0;
 
   // Ensure local directory exists
   const dir = path.dirname(localPath);
   fs.mkdirSync(dir, { recursive: true });
 
+  // Parallel range download for large files
+  if (total > S3_PARALLEL_THRESHOLD) {
+    const chunkSize = Math.ceil(total / S3_PARALLEL_CHUNKS);
+    let totalTransferred = 0;
+
+    // Pre-allocate the output file
+    fs.writeFileSync(localPath, '');
+    const fd = fs.openSync(localPath, 'r+');
+
+    try {
+      await Promise.all(
+        Array.from({ length: S3_PARALLEL_CHUNKS }, async (_, i) => {
+          throwIfAborted(signal);
+          const start = i * chunkSize;
+          const end = Math.min(start + chunkSize - 1, total - 1);
+
+          const resp = await conn.client.send(
+            new GetObjectCommand({
+              Bucket: conn.bucket,
+              Key: key,
+              Range: `bytes=${start}-${end}`,
+            }),
+          );
+
+          const body = resp.Body as Readable;
+          const chunks: Buffer[] = [];
+
+          await new Promise<void>((resolve, reject) => {
+            body.on('data', (chunk: Buffer) => {
+              chunks.push(chunk);
+              totalTransferred += chunk.length;
+              onProgress?.(totalTransferred, total);
+            });
+            body.on('end', () => resolve());
+            body.on('error', (err: Error) =>
+              reject(new Error(`S3 range download failed: ${err.message}`)),
+            );
+          });
+
+          // Write chunk to correct offset in file
+          const data = Buffer.concat(chunks);
+          fs.writeSync(fd, data, 0, data.length, start);
+        }),
+      );
+    } finally {
+      fs.closeSync(fd);
+    }
+    return;
+  }
+
+  // Single-stream download for small files
+  let resp;
+  try {
+    resp = await conn.client.send(
+      new GetObjectCommand({ Bucket: conn.bucket, Key: key }),
+    );
+  } catch (err: any) {
+    throw new Error(friendlyS3Error(err, conn.bucket));
+  }
+
   const body = resp.Body as Readable;
+  let transferred = 0;
   const throttle = createRateLimitedTransform((chunkBytes) => {
     transferred += chunkBytes;
     onProgress?.(transferred, total);
   });
   const writeStream = fs.createWriteStream(localPath, { highWaterMark: 256 * 1024 });
-  let transferred = 0;
   const cleanupAbort = bindAbort(signal, () => {
     const abortError = createAbortError();
     body.destroy(abortError);
@@ -529,12 +589,17 @@ export async function uploadDir(
   };
   gather(localDir, remoteDir);
 
-  // Upload each file (S3 doesn't need explicit mkdir)
-  for (let i = 0; i < allFiles.length; i++) {
+  // Upload files in parallel batches (S3 doesn't need explicit mkdir)
+  const DIR_BATCH_SIZE = 4;
+  let completed = 0;
+  for (let i = 0; i < allFiles.length; i += DIR_BATCH_SIZE) {
     throwIfAborted(signal);
-    const f = allFiles[i];
-    onProgress?.(f.local, i + 1, allFiles.length);
-    await upload(connId, f.local, f.remote, undefined, signal);
+    const batch = allFiles.slice(i, i + DIR_BATCH_SIZE);
+    await Promise.all(batch.map((f) => {
+      completed += 1;
+      onProgress?.(f.local, completed, allFiles.length);
+      return upload(connId, f.local, f.remote, undefined, signal);
+    }));
   }
 }
 
@@ -581,20 +646,21 @@ export async function downloadDir(
   // Ensure local directory exists
   fs.mkdirSync(localDir, { recursive: true });
 
-  // Download each file
-  for (let i = 0; i < allKeys.length; i++) {
+  // Download files in parallel batches
+  const DIR_BATCH_SIZE = 4;
+  let completed = 0;
+  for (let i = 0; i < allKeys.length; i += DIR_BATCH_SIZE) {
     throwIfAborted(signal);
-    const { virtualPath } = allKeys[i];
-    // Calculate relative path from remoteDir
-    const cleanRemoteDir = remoteDir.replace(/\/$/, '');
-    const relativePath = virtualPath.slice(cleanRemoteDir.length + 1);
-    const localPath = path.join(localDir, ...relativePath.split('/'));
-
-    // Ensure parent directory exists
-    fs.mkdirSync(path.dirname(localPath), { recursive: true });
-
-    onProgress?.(virtualPath, i + 1, allKeys.length);
-    await download(connId, virtualPath, localPath, undefined, signal);
+    const batch = allKeys.slice(i, i + DIR_BATCH_SIZE);
+    await Promise.all(batch.map(({ virtualPath }) => {
+      const cleanRemoteDir = remoteDir.replace(/\/$/, '');
+      const relativePath = virtualPath.slice(cleanRemoteDir.length + 1);
+      const localPath = path.join(localDir, ...relativePath.split('/'));
+      fs.mkdirSync(path.dirname(localPath), { recursive: true });
+      completed += 1;
+      onProgress?.(virtualPath, completed, allKeys.length);
+      return download(connId, virtualPath, localPath, undefined, signal);
+    }));
   }
 }
 

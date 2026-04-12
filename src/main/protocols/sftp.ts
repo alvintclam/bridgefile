@@ -15,6 +15,7 @@ interface PooledConnection {
   sftp: SFTPWrapper;
   config: SFTPConfig;
   lastActivity: number;
+  extraChannels?: SFTPWrapper[];
 }
 
 const pool = new Map<string, PooledConnection>();
@@ -42,6 +43,87 @@ function getConn(connId: string): PooledConnection {
   if (!conn) throw new Error(`SFTP connection "${connId}" not found or expired`);
   touch(connId);
   return conn;
+}
+
+// ── Multi-channel support for parallel transfers ───────────────
+
+const PARALLEL_THRESHOLD = 10 * 1024 * 1024; // 10 MB
+const PARALLEL_CHANNELS = 4;
+
+function openSftpChannel(client: Client): Promise<SFTPWrapper> {
+  return new Promise((resolve, reject) => {
+    client.sftp((err, sftp) => {
+      if (err) return reject(new Error(`Failed to open SFTP channel: ${err.message}`));
+      resolve(sftp);
+    });
+  });
+}
+
+async function getSftpChannels(connId: string, count: number): Promise<SFTPWrapper[]> {
+  const conn = getConn(connId);
+  if (conn.extraChannels && conn.extraChannels.length >= count) {
+    return conn.extraChannels.slice(0, count);
+  }
+
+  const needed = count - (conn.extraChannels?.length ?? 0);
+  const newChannels = await Promise.all(
+    Array.from({ length: needed }, () => openSftpChannel(conn.client)),
+  );
+  conn.extraChannels = [...(conn.extraChannels ?? []), ...newChannels];
+  return conn.extraChannels.slice(0, count);
+}
+
+function downloadRange(
+  sftp: SFTPWrapper,
+  remotePath: string,
+  localPath: string,
+  start: number,
+  end: number,
+  onBytes: (bytes: number) => void,
+  signal?: AbortSignal,
+): Promise<void> {
+  return new Promise((resolve, reject) => {
+    const readStream = sftp.createReadStream(remotePath, { start, end, highWaterMark: 256 * 1024 } as any);
+    const writeStream = fs.createWriteStream(localPath, { highWaterMark: 256 * 1024 });
+    let aborted = false;
+
+    const cleanupAbort = bindAbort(signal, () => {
+      aborted = true;
+      readStream.destroy(createAbortError());
+      writeStream.destroy();
+    });
+
+    readStream.on('data', (chunk: Buffer) => {
+      if (!aborted) onBytes(chunk.length);
+    });
+
+    writeStream.on('close', () => {
+      cleanupAbort();
+      if (!aborted) resolve();
+    });
+    writeStream.on('error', (err: Error) => {
+      cleanupAbort();
+      reject(new Error(`Chunk write failed: ${err.message}`));
+    });
+    readStream.on('error', (err: Error) => {
+      cleanupAbort();
+      if (!aborted) reject(new Error(`Chunk read failed: ${err.message}`));
+    });
+
+    readStream.pipe(writeStream);
+  });
+}
+
+function mergeChunks(chunkPaths: string[], destPath: string): void {
+  const writeStream = fs.createWriteStream(destPath, { highWaterMark: 256 * 1024 });
+  for (const chunk of chunkPaths) {
+    const data = fs.readFileSync(chunk);
+    writeStream.write(data);
+    fs.unlinkSync(chunk);
+  }
+  writeStream.end();
+  // Wait for write to finish synchronously
+  fs.closeSync(fs.openSync(destPath, 'r'));
 }
 
 function expandHomePath(filePath: string): string {
@@ -449,8 +531,41 @@ export async function download(
   const dir = path.dirname(localPath);
   fs.mkdirSync(dir, { recursive: true });
 
+  // Multi-channel parallel download for large files (>10MB, no rate limit)
+  if (total > PARALLEL_THRESHOLD && getTransferSpeedLimit() == null) {
+    try {
+      const channels = await getSftpChannels(connId, PARALLEL_CHANNELS);
+      const chunkSize = Math.ceil(total / channels.length);
+      const tmpDir = path.join(os.tmpdir(), 'bridgefile-parallel');
+      fs.mkdirSync(tmpDir, { recursive: true });
+
+      let totalTransferred = 0;
+      const chunkPaths: string[] = [];
+
+      await Promise.all(channels.map((ch, i) => {
+        const start = i * chunkSize;
+        const end = Math.min(start + chunkSize - 1, total - 1);
+        const tmpPath = path.join(tmpDir, `${Date.now()}-${i}-${path.basename(localPath)}`);
+        chunkPaths[i] = tmpPath;
+
+        return downloadRange(ch, remotePath, tmpPath, start, end, (bytes) => {
+          totalTransferred += bytes;
+          onProgress?.(totalTransferred, total);
+        }, signal);
+      }));
+
+      // Merge chunks into final file
+      mergeChunks(chunkPaths, localPath);
+      return;
+    } catch (err) {
+      // If multi-channel fails, fall through to single-channel
+      if (err instanceof Error && err.message.includes('abort')) throw err;
+      // Clean up any partial temp files silently
+    }
+  }
+
   return withReconnect(connId, ({ sftp }) => {
-    // Use fastGet for maximum speed when no rate limit is active
+    // Use fastGet for good speed when no rate limit is active
     if (getTransferSpeedLimit() == null) {
       return new Promise((resolve, reject) => {
         let aborted = false;
@@ -634,12 +749,17 @@ export async function uploadDir(
   };
   await createDirs(localDir, remoteDir);
 
-  // Upload all files
-  for (let i = 0; i < allFiles.length; i++) {
+  // Upload files in parallel batches
+  const DIR_BATCH_SIZE = 4;
+  let completed = 0;
+  for (let i = 0; i < allFiles.length; i += DIR_BATCH_SIZE) {
     throwIfAborted(signal);
-    const f = allFiles[i];
-    onProgress?.(f.local, i + 1, allFiles.length);
-    await upload(connId, f.local, f.remote, undefined, signal);
+    const batch = allFiles.slice(i, i + DIR_BATCH_SIZE);
+    await Promise.all(batch.map((f) => {
+      completed += 1;
+      onProgress?.(f.local, completed, allFiles.length);
+      return upload(connId, f.local, f.remote, undefined, signal);
+    }));
   }
 }
 
@@ -674,12 +794,17 @@ export async function downloadDir(
   };
   await gather(remoteDir, localDir);
 
-  // Download all files
-  for (let i = 0; i < allFiles.length; i++) {
+  // Download files in parallel batches
+  const DIR_BATCH_SIZE = 4;
+  let completed = 0;
+  for (let i = 0; i < allFiles.length; i += DIR_BATCH_SIZE) {
     throwIfAborted(signal);
-    const f = allFiles[i];
-    onProgress?.(f.remote, i + 1, allFiles.length);
-    await download(connId, f.remote, f.local, undefined, signal);
+    const batch = allFiles.slice(i, i + DIR_BATCH_SIZE);
+    await Promise.all(batch.map((f) => {
+      completed += 1;
+      onProgress?.(f.remote, completed, allFiles.length);
+      return download(connId, f.remote, f.local, undefined, signal);
+    }));
   }
 }
 
