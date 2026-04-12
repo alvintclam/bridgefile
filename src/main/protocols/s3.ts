@@ -12,6 +12,8 @@ import * as path from 'path';
 import * as crypto from 'crypto';
 import { Readable } from 'stream';
 import type { S3Config, FileEntry } from '../../shared/types';
+import { bindAbort, createAbortError, throwIfAborted } from './transfer-abort';
+import { createRateLimitedTransform } from './transfer-rate-limit';
 
 // ── Connection pool ────────────────────────────────────────────
 
@@ -215,32 +217,44 @@ export async function upload(
   localPath: string,
   remotePath: string,
   onProgress?: (transferred: number, total: number) => void,
+  signal?: AbortSignal,
 ): Promise<void> {
+  throwIfAborted(signal);
   const conn = getConn(connId);
   const key = resolveKey(conn, remotePath);
   const stat = fs.statSync(localPath);
   const total = stat.size;
 
   // For files under 100 MB, use simple PutObject with a stream
-  const body = fs.createReadStream(localPath);
-
-  let transferred = 0;
-  body.on('data', (chunk: Buffer) => {
-    transferred += chunk.length;
+  const sourceStream = fs.createReadStream(localPath);
+  const throttle = createRateLimitedTransform((chunkBytes) => {
+    transferred += chunkBytes;
     onProgress?.(transferred, total);
   });
+  const cleanupAbort = bindAbort(signal, () => {
+    const abortError = createAbortError();
+    sourceStream.destroy(abortError);
+    throttle.destroy(abortError);
+  });
+  sourceStream.on('error', (error) => throttle.destroy(error));
+  sourceStream.pipe(throttle);
+
+  let transferred = 0;
 
   try {
     await conn.client.send(
       new PutObjectCommand({
         Bucket: conn.bucket,
         Key: key,
-        Body: body,
+        Body: throttle,
         ContentLength: total,
       }),
     );
   } catch (err: any) {
     throw new Error(friendlyS3Error(err, conn.bucket));
+  } finally {
+    cleanupAbort();
+    sourceStream.destroy();
   }
 }
 
@@ -249,7 +263,9 @@ export async function download(
   remotePath: string,
   localPath: string,
   onProgress?: (transferred: number, total: number) => void,
+  signal?: AbortSignal,
 ): Promise<void> {
+  throwIfAborted(signal);
   const conn = getConn(connId);
   const key = resolveKey(conn, remotePath);
 
@@ -272,24 +288,35 @@ export async function download(
   fs.mkdirSync(dir, { recursive: true });
 
   const body = resp.Body as Readable;
+  const throttle = createRateLimitedTransform((chunkBytes) => {
+    transferred += chunkBytes;
+    onProgress?.(transferred, total);
+  });
   const writeStream = fs.createWriteStream(localPath);
   let transferred = 0;
+  const cleanupAbort = bindAbort(signal, () => {
+    const abortError = createAbortError();
+    body.destroy(abortError);
+    throttle.destroy(abortError);
+    writeStream.destroy(abortError);
+  });
 
   return new Promise((resolve, reject) => {
-    body.on('data', (chunk: Buffer) => {
-      transferred += chunk.length;
-      onProgress?.(transferred, total);
-    });
-
     body.on('error', (err: Error) =>
-      reject(new Error(`S3 download stream error: ${err.message}`)),
+      throttle.destroy(new Error(`S3 download stream error: ${err.message}`)),
     );
     writeStream.on('error', (err: Error) =>
       reject(new Error(`Write error: ${err.message}`)),
     );
-    writeStream.on('close', () => resolve());
+    throttle.on('error', (err: Error) =>
+      reject(new Error(`S3 download throttling failed: ${err.message}`)),
+    );
+    writeStream.on('close', () => {
+      cleanupAbort();
+      resolve();
+    });
 
-    body.pipe(writeStream);
+    body.pipe(throttle).pipe(writeStream);
   });
 }
 
@@ -359,6 +386,69 @@ export async function rename(
   }
 }
 
+export async function stat(connId: string, virtualPath: string): Promise<FileEntry> {
+  const conn = getConn(connId);
+
+  if (virtualPath === '/') {
+    return {
+      name: '/',
+      path: '/',
+      size: 0,
+      modifiedAt: 0,
+      isDirectory: true,
+    };
+  }
+
+  const key = resolveKey(conn, virtualPath);
+
+  try {
+    const head = await conn.client.send(
+      new HeadObjectCommand({
+        Bucket: conn.bucket,
+        Key: key,
+      }),
+    );
+
+    return {
+      name: path.posix.basename(virtualPath),
+      path: virtualPath,
+      size: head.ContentLength ?? 0,
+      modifiedAt: head.LastModified?.getTime() ?? 0,
+      isDirectory: false,
+    };
+  } catch (err: any) {
+    const code: string = err?.name ?? err?.Code ?? '';
+    const msg: string = err?.message ?? String(err);
+    const isMissing = code === 'NotFound' || code === 'NoSuchKey' || /not found|NoSuchKey/i.test(msg);
+    if (!isMissing) {
+      throw new Error(friendlyS3Error(err, conn.bucket));
+    }
+  }
+
+  let prefix = key;
+  if (!prefix.endsWith('/')) prefix += '/';
+
+  const resp = await conn.client.send(
+    new ListObjectsV2Command({
+      Bucket: conn.bucket,
+      Prefix: prefix,
+      MaxKeys: 1,
+    }),
+  );
+
+  if ((resp.Contents?.length ?? 0) > 0) {
+    return {
+      name: path.posix.basename(virtualPath),
+      path: virtualPath,
+      size: 0,
+      modifiedAt: 0,
+      isDirectory: true,
+    };
+  }
+
+  throw new Error(`stat failed: "${virtualPath}" not found`);
+}
+
 /**
  * Delete an object or all objects under a prefix.
  */
@@ -396,11 +486,14 @@ export async function uploadDir(
   localDir: string,
   remoteDir: string,
   onProgress?: (file: string, fileIndex: number, totalFiles: number) => void,
+  signal?: AbortSignal,
 ): Promise<void> {
+  throwIfAborted(signal);
   // Gather all local files recursively
   const allFiles: { local: string; remote: string }[] = [];
 
   const gather = (localBase: string, remoteBase: string) => {
+    throwIfAborted(signal);
     const items = fs.readdirSync(localBase, { withFileTypes: true });
     for (const item of items) {
       const localPath = path.join(localBase, item.name);
@@ -416,9 +509,10 @@ export async function uploadDir(
 
   // Upload each file (S3 doesn't need explicit mkdir)
   for (let i = 0; i < allFiles.length; i++) {
+    throwIfAborted(signal);
     const f = allFiles[i];
     onProgress?.(f.local, i + 1, allFiles.length);
-    await upload(connId, f.local, f.remote);
+    await upload(connId, f.local, f.remote, undefined, signal);
   }
 }
 
@@ -427,7 +521,9 @@ export async function downloadDir(
   remoteDir: string,
   localDir: string,
   onProgress?: (file: string, fileIndex: number, totalFiles: number) => void,
+  signal?: AbortSignal,
 ): Promise<void> {
+  throwIfAborted(signal);
   const conn = getConn(connId);
 
   // List all objects under the prefix recursively
@@ -438,6 +534,7 @@ export async function downloadDir(
   let continuationToken: string | undefined;
 
   do {
+    throwIfAborted(signal);
     const resp = await conn.client.send(
       new ListObjectsV2Command({
         Bucket: conn.bucket,
@@ -464,6 +561,7 @@ export async function downloadDir(
 
   // Download each file
   for (let i = 0; i < allKeys.length; i++) {
+    throwIfAborted(signal);
     const { virtualPath } = allKeys[i];
     // Calculate relative path from remoteDir
     const cleanRemoteDir = remoteDir.replace(/\/$/, '');
@@ -474,7 +572,7 @@ export async function downloadDir(
     fs.mkdirSync(path.dirname(localPath), { recursive: true });
 
     onProgress?.(virtualPath, i + 1, allKeys.length);
-    await download(connId, virtualPath, localPath);
+    await download(connId, virtualPath, localPath, undefined, signal);
   }
 }
 

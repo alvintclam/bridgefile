@@ -9,6 +9,7 @@
     "build:preload": "tsc -p tsconfig.preload.json",
     "build:renderer": "vite build --config vite.config.ts",
     "build": "npm run build:main && npm run build:preload && npm run build:renderer",
+    "test": "tsc -p tsconfig.test.json && node --test dist-test/test/transfer-scheduler.test.js dist-test/test/transfer-rate-limit.test.js dist-test/test/connection-profile-ui.test.js",
     "pack": "npm run build && electron-builder --dir",
     "dist": "npm run build && electron-builder",
     "dist:win": "npm run build && electron-builder --win",

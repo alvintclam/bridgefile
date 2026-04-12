@@ -49,7 +49,7 @@ async function getSecret(id: string, key: string): Promise<string | null> {
 async function deleteSecrets(id: string): Promise<void> {
   if (keytar) {
     // Remove known credential keys
-    for (const key of ['password', 'privateKey', 'passphrase', 'secretAccessKey']) {
+    for (const key of ['password', 'privateKey', 'passphrase', 'proxyPassword', 'secretAccessKey']) {
       try {
         await keytar.deletePassword(SERVICE_NAME, `${id}:${key}`);
       } catch {
@@ -139,13 +139,117 @@ interface StoredProfile {
   config: Record<string, unknown>;
   lastUsed?: number;
   favorite: boolean;
+  group?: string;
+}
+
+type StoredProfileRecord = Partial<StoredProfile> & Record<string, unknown>;
+
+const LEGACY_CONFIG_KEYS: Record<'sftp' | 'ftp' | 's3', string[]> = {
+  sftp: [
+    'host',
+    'port',
+    'username',
+    'password',
+    'privateKey',
+    'privateKeyPath',
+    'passphrase',
+    'proxyHost',
+    'proxyPort',
+    'proxyUsername',
+    'proxyPassword',
+    'timeout',
+  ],
+  ftp: [
+    'host',
+    'port',
+    'username',
+    'password',
+    'secure',
+    'secureOptions',
+    'timeout',
+  ],
+  s3: [
+    'accessKey',
+    'accessKeyId',
+    'secretKey',
+    'secretAccessKey',
+    'region',
+    'bucket',
+    'prefix',
+    'endpoint',
+    'forcePathStyle',
+    'timeout',
+  ],
+};
+
+function isRecord(value: unknown): value is Record<string, unknown> {
+  return typeof value === 'object' && value !== null && !Array.isArray(value);
+}
+
+function normalizeProfileType(value: unknown): 'sftp' | 'ftp' | 's3' {
+  if (typeof value === 'string') {
+    const normalized = value.toLowerCase();
+    if (normalized === 'sftp' || normalized === 'ftp' || normalized === 's3') {
+      return normalized;
+    }
+  }
+  return 'sftp';
+}
+
+function normalizeLastUsed(value: unknown): number | undefined {
+  if (typeof value === 'number' && Number.isFinite(value)) return value;
+  if (typeof value === 'string' && value) {
+    const asNumber = Number(value);
+    if (Number.isFinite(asNumber) && asNumber > 0) return asNumber;
+    const parsed = Date.parse(value);
+    if (Number.isFinite(parsed)) return parsed;
+  }
+  return undefined;
+}
+
+function normalizeStoredProfile(raw: StoredProfileRecord): StoredProfile {
+  const type = normalizeProfileType(raw.type);
+  const config = isRecord(raw.config) ? { ...raw.config } : {};
+
+  for (const key of LEGACY_CONFIG_KEYS[type]) {
+    if (raw[key] !== undefined && config[key] === undefined) {
+      config[key] = raw[key];
+    }
+  }
+
+  // Compatibility for older renderer field names.
+  if (type === 'sftp' && config.privateKey === undefined && typeof raw.privateKeyPath === 'string') {
+    config.privateKey = raw.privateKeyPath;
+  }
+  if (type === 's3') {
+    if (config.accessKeyId === undefined && typeof raw.accessKey === 'string') {
+      config.accessKeyId = raw.accessKey;
+    }
+    if (config.secretAccessKey === undefined && typeof raw.secretKey === 'string') {
+      config.secretAccessKey = raw.secretKey;
+    }
+  }
+
+  return {
+    id: typeof raw.id === 'string' && raw.id ? raw.id : crypto.randomUUID(),
+    name: typeof raw.name === 'string' && raw.name ? raw.name : 'Untitled',
+    type,
+    config,
+    lastUsed: normalizeLastUsed(raw.lastUsed),
+    favorite: Boolean(raw.favorite),
+    group: typeof raw.group === 'string' ? raw.group : undefined,
+  };
 }
 
 function readProfiles(): StoredProfile[] {
   const filePath = getStoragePath();
   try {
     const raw = fs.readFileSync(filePath, 'utf-8');
-    return JSON.parse(raw);
+    const parsed = JSON.parse(raw);
+    if (!Array.isArray(parsed)) return [];
+    return parsed
+      .filter(isRecord)
+      .map((entry) => normalizeStoredProfile(entry));
   } catch {
     return [];
   }
@@ -205,6 +309,7 @@ export async function getAllProfiles(): Promise<ConnectionProfile[]> {
       config: fullConfig as any,
       lastUsed: s.lastUsed,
       favorite: s.favorite,
+      group: s.group,
     });
   }
 
@@ -241,6 +346,7 @@ export async function saveProfile(profile: ConnectionProfile): Promise<Connectio
     config: clean,
     lastUsed: profile.lastUsed ?? Date.now(),
     favorite: profile.favorite ?? false,
+    group: profile.group,
   };
 
   const idx = profiles.findIndex((p) => p.id === profile.id);

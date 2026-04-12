@@ -1,90 +1,27 @@
-import React, { useState, useEffect } from 'react';
+import React, { useState, useEffect, useCallback } from 'react';
+import {
+  DEFAULT_GROUPS,
+  EMPTY_FTP,
+  EMPTY_S3,
+  EMPTY_SFTP,
+  mergeGroups,
+  toSftpConnectConfig,
+  toStoredProfile,
+  toUIProfile,
+} from '../../shared/connection-profile-ui';
+import type {
+  ProtocolTab,
+  UIConnectionProfile as ConnectionProfile,
+} from '../../shared/connection-profile-ui';
 import { t } from '../lib/i18n';
 import { logConnection, logConnected, logError } from './LogPanel';
-
-export interface ConnectionProfile {
-  id: string;
-  name: string;
-  type: 'SFTP' | 'S3' | 'FTP';
-  favorite: boolean;
-  lastUsed?: Date;
-  /** Group/folder for organizing connections */
-  group?: string;
-  // SFTP
-  host?: string;
-  port?: number;
-  username?: string;
-  password?: string;
-  privateKeyPath?: string;
-  // SFTP proxy / jump host
-  proxyHost?: string;
-  proxyPort?: number;
-  proxyUsername?: string;
-  proxyPassword?: string;
-  // FTP / FTPS
-  secure?: boolean;
-  // S3
-  accessKey?: string;
-  secretKey?: string;
-  region?: string;
-  bucket?: string;
-  prefix?: string;
-  endpoint?: string;
-  // Common
-  timeout?: number;
-}
+export type { UIConnectionProfile as ConnectionProfile } from '../../shared/connection-profile-ui';
 
 interface ConnectionManagerProps {
   isOpen: boolean;
   onClose: () => void;
   onConnect: (profile: ConnectionProfile, connectionId: string) => void;
 }
-
-const DEFAULT_GROUPS = ['Production', 'Staging', 'Personal'];
-
-const EMPTY_SFTP: Partial<ConnectionProfile> = {
-  name: '',
-  type: 'SFTP',
-  host: '',
-  port: 22,
-  username: '',
-  password: '',
-  privateKeyPath: '',
-  proxyHost: '',
-  proxyPort: 22,
-  proxyUsername: '',
-  proxyPassword: '',
-  favorite: false,
-  group: '',
-  timeout: 30,
-};
-
-const EMPTY_FTP: Partial<ConnectionProfile> = {
-  name: '',
-  type: 'FTP',
-  host: '',
-  port: 21,
-  username: '',
-  password: '',
-  secure: false,
-  favorite: false,
-  group: '',
-  timeout: 30,
-};
-
-const EMPTY_S3: Partial<ConnectionProfile> = {
-  name: '',
-  type: 'S3',
-  accessKey: '',
-  secretKey: '',
-  region: 'us-east-1',
-  bucket: '',
-  prefix: '',
-  endpoint: '',
-  favorite: false,
-  group: '',
-  timeout: 30,
-};
 
 function isElectron(): boolean {
   return typeof window !== 'undefined' && typeof window.bridgefile !== 'undefined';
@@ -97,7 +34,7 @@ export default function ConnectionManager({
 }: ConnectionManagerProps) {
   const [profiles, setProfiles] = useState<ConnectionProfile[]>([]);
   const [selectedId, setSelectedId] = useState<string | null>(null);
-  const [activeTab, setActiveTab] = useState<'SFTP' | 'FTP' | 'S3'>('SFTP');
+  const [activeTab, setActiveTab] = useState<ProtocolTab>('SFTP');
   const [formData, setFormData] = useState<Partial<ConnectionProfile>>(EMPTY_SFTP);
   const [isEditing, setIsEditing] = useState(false);
   const [connecting, setConnecting] = useState(false);
@@ -108,25 +45,58 @@ export default function ConnectionManager({
   const [newGroupName, setNewGroupName] = useState<string | null>(null);
   const [dragProfileId, setDragProfileId] = useState<string | null>(null);
 
-  // Load real profiles from IPC on mount
-  const loadProfiles = async () => {
-    if (isElectron()) {
-      try {
-        const saved = await window.bridgefile.connections.getAll();
-        setProfiles(saved as unknown as ConnectionProfile[]);
-      } catch {
-        setProfiles([]);
-      }
-    } else {
+  const getEmptyForm = useCallback((tab: ProtocolTab) => {
+    if (tab === 'SFTP') return { ...EMPTY_SFTP };
+    if (tab === 'FTP') return { ...EMPTY_FTP };
+    return { ...EMPTY_S3 };
+  }, []);
+
+  const loadProfiles = useCallback(async () => {
+    if (!isElectron()) {
       setProfiles([]);
+      setGroups(DEFAULT_GROUPS);
+      return;
     }
-  };
+
+    try {
+      const saved = await window.bridgefile.connections.getAll();
+      const uiProfiles = saved.map(toUIProfile);
+      setProfiles(uiProfiles);
+      setGroups(mergeGroups(uiProfiles));
+    } catch {
+      setProfiles([]);
+      setGroups(DEFAULT_GROUPS);
+    }
+  }, []);
+
+  const persistProfile = useCallback(
+    async (profile: ConnectionProfile): Promise<ConnectionProfile> => {
+      if (!isElectron()) return profile;
+      const saved = await window.bridgefile.connections.save(toStoredProfile(profile));
+      return toUIProfile(saved);
+    },
+    [],
+  );
+
+  const applyProfileLocally = useCallback((profile: ConnectionProfile) => {
+    setProfiles((prev) => {
+      const exists = prev.some((entry) => entry.id === profile.id);
+      const next = exists
+        ? prev.map((entry) => (entry.id === profile.id ? profile : entry))
+        : [...prev, profile];
+      setGroups(mergeGroups(next));
+      return next;
+    });
+    if (selectedId === profile.id) {
+      setFormData(profile);
+    }
+  }, [selectedId]);
 
   useEffect(() => {
     if (isOpen) {
-      loadProfiles();
+      void loadProfiles();
     }
-  }, [isOpen]);
+  }, [isOpen, loadProfiles]);
 
   if (!isOpen) return null;
 
@@ -138,12 +108,7 @@ export default function ConnectionManager({
     setActiveTab(profile.type);
     setIsEditing(false);
     setConnectError(null);
-  };
-
-  const getEmptyForm = (tab: 'SFTP' | 'FTP' | 'S3') => {
-    if (tab === 'SFTP') return { ...EMPTY_SFTP };
-    if (tab === 'FTP') return { ...EMPTY_FTP };
-    return { ...EMPTY_S3 };
+    setShowProxy(Boolean(profile.proxyHost || profile.proxyUsername || profile.proxyPassword));
   };
 
   const handleNewConnection = () => {
@@ -151,43 +116,41 @@ export default function ConnectionManager({
     setIsEditing(true);
     setFormData(getEmptyForm(activeTab));
     setConnectError(null);
+    setShowProxy(false);
   };
 
-  const handleTabSwitch = (tab: 'SFTP' | 'FTP' | 'S3') => {
+  const handleTabSwitch = (tab: ProtocolTab) => {
     setActiveTab(tab);
     if (isEditing && !selectedId) {
       setFormData(getEmptyForm(tab));
     }
     setConnectError(null);
+    if (tab !== 'SFTP') {
+      setShowProxy(false);
+    }
   };
 
   const handleSave = async () => {
     const newProfile: ConnectionProfile = {
       ...formData,
       id: selectedId || Date.now().toString(),
-      name: formData.name || 'Untitled',
+      name: formData.name?.trim() || 'Untitled',
       type: activeTab,
-      favorite: formData.favorite || false,
+      favorite: Boolean(formData.favorite),
+      lastUsed: selectedProfile?.lastUsed ?? formData.lastUsed,
     } as ConnectionProfile;
 
     if (isElectron()) {
       try {
-        await window.bridgefile.connections.save(newProfile as any);
-        await loadProfiles();
+        const saved = await persistProfile(newProfile);
+        applyProfileLocally(saved);
+        setFormData(saved);
       } catch {
         // Fallback to local state
-        if (selectedId) {
-          setProfiles(prev => prev.map(p => (p.id === selectedId ? newProfile : p)));
-        } else {
-          setProfiles(prev => [...prev, newProfile]);
-        }
+        applyProfileLocally(newProfile);
       }
     } else {
-      if (selectedId) {
-        setProfiles(prev => prev.map(p => (p.id === selectedId ? newProfile : p)));
-      } else {
-        setProfiles(prev => [...prev, newProfile]);
-      }
+      applyProfileLocally(newProfile);
     }
     setSelectedId(newProfile.id);
     setIsEditing(false);
@@ -196,15 +159,23 @@ export default function ConnectionManager({
   const handleDelete = async () => {
     if (!selectedId) return;
 
+    const removeProfileLocally = () => {
+      setProfiles((prev) => {
+        const next = prev.filter((profile) => profile.id !== selectedId);
+        setGroups(mergeGroups(next));
+        return next;
+      });
+    };
+
     if (isElectron()) {
       try {
         await window.bridgefile.connections.delete(selectedId);
-        await loadProfiles();
+        removeProfileLocally();
       } catch {
-        setProfiles(prev => prev.filter(p => p.id !== selectedId));
+        removeProfileLocally();
       }
     } else {
-      setProfiles(prev => prev.filter(p => p.id !== selectedId));
+      removeProfileLocally();
     }
     setSelectedId(null);
     setFormData(getEmptyForm(activeTab));
@@ -233,21 +204,7 @@ export default function ConnectionManager({
       let connId: string;
 
       if (profile.type === 'SFTP') {
-        const sftpConfig: Record<string, unknown> = {
-          host: profile.host || '',
-          port: profile.port || 22,
-          username: profile.username || '',
-          password: profile.password,
-          privateKey: profile.privateKeyPath,
-          timeout: profile.timeout ?? 30,
-        };
-        if (profile.proxyHost) {
-          sftpConfig.proxyHost = profile.proxyHost;
-          sftpConfig.proxyPort = profile.proxyPort || 22;
-          sftpConfig.proxyUsername = profile.proxyUsername;
-          sftpConfig.proxyPassword = profile.proxyPassword;
-        }
-        connId = await window.bridgefile.sftp.connect(sftpConfig as any);
+        connId = await window.bridgefile.sftp.connect(toSftpConnectConfig(profile));
       } else if (profile.type === 'FTP') {
         connId = await window.bridgefile.ftp.connect({
           host: profile.host || '',
@@ -270,8 +227,19 @@ export default function ConnectionManager({
         });
       }
 
+      const connectedProfile = {
+        ...profile,
+        lastUsed: Date.now(),
+      };
+      if (selectedProfile) {
+        applyProfileLocally(connectedProfile);
+        void persistProfile(connectedProfile)
+          .then((saved) => applyProfileLocally(saved))
+          .catch(() => undefined);
+      }
+
       logConnected(profile.type, profile.host || profile.bucket || 'server', profile.username);
-      onConnect(profile, connId);
+      onConnect(connectedProfile, connId);
     } catch (err: unknown) {
       const msg = err instanceof Error ? err.message : String(err);
       logError(`Connection failed: ${msg}`);
@@ -282,9 +250,14 @@ export default function ConnectionManager({
   };
 
   const toggleFavorite = (id: string) => {
-    setProfiles(prev =>
-      prev.map(p => (p.id === id ? { ...p, favorite: !p.favorite } : p))
-    );
+    const profile = profiles.find((entry) => entry.id === id);
+    if (!profile) return;
+
+    const updated = { ...profile, favorite: !profile.favorite };
+    applyProfileLocally(updated);
+    void persistProfile(updated)
+      .then((saved) => applyProfileLocally(saved))
+      .catch(() => undefined);
   };
 
   const updateField = (key: string, value: string | number | boolean) => {
@@ -294,8 +267,8 @@ export default function ConnectionManager({
 
   const favorites = profiles.filter(p => p.favorite);
   const recent = [...profiles]
-    .filter(p => p.lastUsed)
-    .sort((a, b) => (b.lastUsed?.getTime() || 0) - (a.lastUsed?.getTime() || 0))
+    .filter((profile) => typeof profile.lastUsed === 'number')
+    .sort((a, b) => (b.lastUsed ?? 0) - (a.lastUsed ?? 0))
     .slice(0, 5);
 
   // Group profiles by their group field
@@ -329,13 +302,14 @@ export default function ConnectionManager({
 
   const handleDropOnGroup = (group: string) => {
     if (!dragProfileId) return;
-    setProfiles(prev =>
-      prev.map(p => (p.id === dragProfileId ? { ...p, group } : p)),
-    );
-    // Also update form data if the dragged profile is selected
-    if (dragProfileId === selectedId) {
-      setFormData(prev => ({ ...prev, group }));
-    }
+    const profile = profiles.find((entry) => entry.id === dragProfileId);
+    if (!profile) return;
+
+    const updated = { ...profile, group };
+    applyProfileLocally(updated);
+    void persistProfile(updated)
+      .then((saved) => applyProfileLocally(saved))
+      .catch(() => undefined);
     setDragProfileId(null);
   };
 
@@ -401,6 +375,25 @@ export default function ConnectionManager({
                 {favorites.map(p => (
                   <ProfileItem
                     key={p.id}
+                    profile={p}
+                    selected={p.id === selectedId}
+                    onSelect={() => handleSelectProfile(p)}
+                    onToggleFavorite={() => toggleFavorite(p.id)}
+                    onDragStart={() => handleDragStart(p.id)}
+                  />
+                ))}
+              </div>
+            )}
+
+            {/* Recent */}
+            {recent.length > 0 && (
+              <div className="px-3 pt-3">
+                <div className="text-[10px] uppercase tracking-wider text-[#71717a] mb-1.5 font-medium">
+                  {t('recent')}
+                </div>
+                {recent.map(p => (
+                  <ProfileItem
+                    key={`recent-${p.id}`}
                     profile={p}
                     selected={p.id === selectedId}
                     onSelect={() => handleSelectProfile(p)}
@@ -614,6 +607,18 @@ export default function ConnectionManager({
                     onChange={e => updateField('privateKeyPath', e.target.value)}
                     placeholder="~/.ssh/id_rsa"
                     className="w-full px-2.5 py-1.5 text-sm bg-[#0a0a0f] border border-[#1e1e2e] rounded text-[#e4e4e7] placeholder-[#71717a] focus:border-[#3b82f6] focus:outline-none transition-colors font-mono text-xs"
+                  />
+                </div>
+                <div className="mb-3">
+                  <label className="block text-[11px] text-[#71717a] mb-1 uppercase tracking-wide">
+                    Key Passphrase
+                  </label>
+                  <input
+                    type="password"
+                    value={formData.passphrase || ''}
+                    onChange={e => updateField('passphrase', e.target.value)}
+                    placeholder="Leave blank for unencrypted keys"
+                    className="w-full px-2.5 py-1.5 text-sm bg-[#0a0a0f] border border-[#1e1e2e] rounded text-[#e4e4e7] placeholder-[#71717a] focus:border-[#3b82f6] focus:outline-none transition-colors"
                   />
                 </div>
 

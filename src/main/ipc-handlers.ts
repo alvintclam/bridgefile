@@ -3,22 +3,33 @@ import * as os from 'os';
 import * as fs from 'fs';
 import * as path from 'path';
 import * as crypto from 'crypto';
+import { fileURLToPath } from 'url';
 import * as sftpClient from './protocols/sftp';
 import * as ftpClient from './protocols/ftp';
 import * as s3Client from './protocols/s3';
+import { isAbortError } from './protocols/transfer-abort';
+import { getTransferSpeedLimit, setTransferPaused, setTransferSpeedLimit } from './protocols/transfer-rate-limit';
+import { canStartTransfer } from './protocols/transfer-scheduler';
 import * as store from './store';
 import { checkForUpdates } from './auto-updater';
-import type { FileEntry, TransferItem } from '../shared/types';
+import type { FileEntry, TransferItem, TransferQueueState } from '../shared/types';
 
 // ── In-memory transfer queue ───────────────────────────────────
 
 const transferQueue: TransferItem[] = [];
+const runningTransferIds = new Set<string>();
+const activeTransferControllers = new Map<string, AbortController>();
+const transferSettings = {
+  maxConcurrent: 2,
+  paused: false,
+  speedLimitMbps: getTransferSpeedLimit(),
+};
 
-function addTransfer(item: TransferItem): void {
-  transferQueue.push(item);
-  // Keep queue bounded — remove completed items beyond 200
+function trimCompletedTransfers(): void {
   const completed = transferQueue.filter(
-    (t) => t.status === 'completed' || t.status === 'cancelled',
+    (t) =>
+      (t.status === 'completed' || t.status === 'cancelled') &&
+      !runningTransferIds.has(t.id),
   );
   if (completed.length > 200) {
     const toRemove = completed.slice(0, completed.length - 200);
@@ -26,6 +37,210 @@ function addTransfer(item: TransferItem): void {
       const idx = transferQueue.indexOf(t);
       if (idx >= 0) transferQueue.splice(idx, 1);
     }
+  }
+}
+
+function addTransfer(item: TransferItem): void {
+  transferQueue.push(item);
+  trimCompletedTransfers();
+  scheduleTransfers();
+}
+
+function startTransfer(transfer: TransferItem): void {
+  if (runningTransferIds.has(transfer.id)) return;
+
+  runningTransferIds.add(transfer.id);
+  const controller = new AbortController();
+  activeTransferControllers.set(transfer.id, controller);
+  transfer.status = 'in-progress';
+  transfer.error = undefined;
+  transfer.startedAt = Date.now();
+  transfer.completedAt = undefined;
+
+  let task: Promise<void>;
+  if (transfer.entryType === 'directory') {
+    const onDirectoryProgress = (file: string, fileIndex: number, totalFiles: number) => {
+      if (transfer.status === 'cancelled') return;
+      transfer.currentFile = path.basename(file);
+      transfer.transferred = fileIndex;
+      transfer.size = totalFiles;
+    };
+
+    switch (transfer.protocol) {
+      case 'sftp':
+        task = transfer.direction === 'upload'
+          ? sftpClient.uploadDir(transfer.connectionId, transfer.localPath, transfer.remotePath, onDirectoryProgress, controller.signal)
+          : sftpClient.downloadDir(transfer.connectionId, transfer.remotePath, transfer.localPath, onDirectoryProgress, controller.signal);
+        break;
+      case 'ftp':
+        task = transfer.direction === 'upload'
+          ? ftpClient.uploadDir(transfer.connectionId, transfer.localPath, transfer.remotePath, onDirectoryProgress, controller.signal)
+          : ftpClient.downloadDir(transfer.connectionId, transfer.remotePath, transfer.localPath, onDirectoryProgress, controller.signal);
+        break;
+      case 's3':
+        task = transfer.direction === 'upload'
+          ? s3Client.uploadDir(transfer.connectionId, transfer.localPath, transfer.remotePath, onDirectoryProgress, controller.signal)
+          : s3Client.downloadDir(transfer.connectionId, transfer.remotePath, transfer.localPath, onDirectoryProgress, controller.signal);
+        break;
+    }
+  } else {
+    const onProgress = (transferred: number, total: number) => {
+      if (transfer.status === 'cancelled') return;
+      transfer.transferred = transferred;
+      transfer.size = total;
+    };
+
+    switch (transfer.protocol) {
+      case 'sftp':
+        task = transfer.direction === 'upload'
+          ? sftpClient.upload(transfer.connectionId, transfer.localPath, transfer.remotePath, onProgress, controller.signal)
+          : sftpClient.download(transfer.connectionId, transfer.remotePath, transfer.localPath, onProgress, controller.signal);
+        break;
+      case 'ftp':
+        task = transfer.direction === 'upload'
+          ? ftpClient.upload(transfer.connectionId, transfer.localPath, transfer.remotePath, onProgress, controller.signal)
+          : ftpClient.download(transfer.connectionId, transfer.remotePath, transfer.localPath, onProgress, controller.signal);
+        break;
+      case 's3':
+        task = transfer.direction === 'upload'
+          ? s3Client.upload(transfer.connectionId, transfer.localPath, transfer.remotePath, onProgress, controller.signal)
+          : s3Client.download(transfer.connectionId, transfer.remotePath, transfer.localPath, onProgress, controller.signal);
+        break;
+    }
+  }
+
+  task
+    .then(() => {
+      if (transfer.status === 'cancelled') return;
+      transfer.status = 'completed';
+      transfer.transferred = transfer.size;
+      transfer.currentFile = undefined;
+      transfer.completedAt = Date.now();
+    })
+    .catch((err: Error) => {
+      if (isAbortError(err)) {
+        transfer.status = 'cancelled';
+        transfer.completedAt = transfer.completedAt ?? Date.now();
+        transfer.error = undefined;
+        return;
+      }
+      if (transfer.status === 'cancelled') return;
+      transfer.status = 'failed';
+      transfer.error = err.message;
+    })
+    .finally(() => {
+      runningTransferIds.delete(transfer.id);
+      activeTransferControllers.delete(transfer.id);
+      trimCompletedTransfers();
+      scheduleTransfers();
+    });
+}
+
+function scheduleTransfers(): void {
+  if (transferSettings.paused) return;
+
+  let availableSlots = transferSettings.maxConcurrent - runningTransferIds.size;
+  if (availableSlots <= 0) return;
+
+  for (const item of transferQueue) {
+    if (availableSlots <= 0) break;
+    if (!canStartTransfer(item, transferQueue, runningTransferIds)) continue;
+    startTransfer(item);
+    availableSlots -= 1;
+  }
+}
+
+function getTransferState(): TransferQueueState {
+  return {
+    items: [...transferQueue],
+    maxConcurrent: transferSettings.maxConcurrent,
+    paused: transferSettings.paused,
+    speedLimitMbps: transferSettings.speedLimitMbps,
+  };
+}
+
+function toLocalFileEntry(targetPath: string): FileEntry {
+  const stat = fs.statSync(targetPath);
+  return {
+    name: path.basename(targetPath),
+    path: targetPath,
+    size: stat.size,
+    modifiedAt: stat.mtimeMs,
+    isDirectory: stat.isDirectory(),
+  };
+}
+
+function normalizeLocalPath(targetPath: string): string {
+  if (targetPath.startsWith('file://')) {
+    try {
+      return fileURLToPath(targetPath);
+    } catch {
+      return targetPath;
+    }
+  }
+
+  return path.normalize(targetPath);
+}
+
+function isEnoentError(error: unknown): boolean {
+  return typeof error === 'object' && error !== null && 'code' in error && error.code === 'ENOENT';
+}
+
+function sleep(ms: number): Promise<void> {
+  return new Promise((resolve) => setTimeout(resolve, ms));
+}
+
+async function statLocalEntry(targetPath: string, retries = 2): Promise<FileEntry> {
+  const normalizedPath = normalizeLocalPath(targetPath);
+
+  for (let attempt = 0; ; attempt += 1) {
+    try {
+      return toLocalFileEntry(normalizedPath);
+    } catch (error) {
+      if (!isEnoentError(error) || attempt >= retries) {
+        throw error;
+      }
+      await sleep(40 * (attempt + 1));
+    }
+  }
+}
+
+async function downloadRemoteToTemp(
+  protocol: 'sftp' | 's3' | 'ftp',
+  connId: string,
+  remotePath: string,
+  tmpPath: string,
+): Promise<void> {
+  if (protocol === 'sftp') {
+    await sftpClient.download(connId, remotePath, tmpPath);
+  } else if (protocol === 'ftp') {
+    await ftpClient.download(connId, remotePath, tmpPath);
+  } else {
+    await s3Client.download(connId, remotePath, tmpPath);
+  }
+}
+
+async function computeRemoteChecksum(
+  protocol: 'sftp' | 's3' | 'ftp',
+  connId: string,
+  remotePath: string,
+  algorithm: string,
+): Promise<string> {
+  const tmpDir = path.join(app.getPath('temp'), 'bridgefile-checksum');
+  fs.mkdirSync(tmpDir, { recursive: true });
+
+  const fileName = path.basename(remotePath);
+  const tmpPath = path.join(tmpDir, `${Date.now()}-${fileName}`);
+
+  await downloadRemoteToTemp(protocol, connId, remotePath, tmpPath);
+
+  try {
+    const hash = crypto.createHash(algorithm);
+    const data = fs.readFileSync(tmpPath);
+    hash.update(data);
+    return hash.digest('hex');
+  } finally {
+    try { fs.unlinkSync(tmpPath); } catch { /* ignore */ }
   }
 }
 
@@ -73,32 +288,18 @@ export function registerIPCHandlers(): void {
 
       const transfer: TransferItem = {
         id,
+        protocol: 'sftp',
         connectionId: connId,
+        entryType: 'file',
         direction: 'upload',
         localPath,
         remotePath,
         fileName,
         size: stat.size,
         transferred: 0,
-        status: 'in-progress',
-        startedAt: Date.now(),
+        status: 'queued',
       };
       addTransfer(transfer);
-
-      // Run upload async — don't block the IPC reply
-      sftpClient
-        .upload(connId, localPath, remotePath, (transferred, total) => {
-          transfer.transferred = transferred;
-          transfer.size = total;
-        })
-        .then(() => {
-          transfer.status = 'completed';
-          transfer.completedAt = Date.now();
-        })
-        .catch((err) => {
-          transfer.status = 'failed';
-          transfer.error = err.message;
-        });
 
       return id;
     },
@@ -112,31 +313,18 @@ export function registerIPCHandlers(): void {
 
       const transfer: TransferItem = {
         id,
+        protocol: 'sftp',
         connectionId: connId,
+        entryType: 'file',
         direction: 'download',
         localPath,
         remotePath,
         fileName,
         size: 0,
         transferred: 0,
-        status: 'in-progress',
-        startedAt: Date.now(),
+        status: 'queued',
       };
       addTransfer(transfer);
-
-      sftpClient
-        .download(connId, remotePath, localPath, (transferred, total) => {
-          transfer.transferred = transferred;
-          transfer.size = total;
-        })
-        .then(() => {
-          transfer.status = 'completed';
-          transfer.completedAt = Date.now();
-        })
-        .catch((err) => {
-          transfer.status = 'failed';
-          transfer.error = err.message;
-        });
 
       return id;
     },
@@ -164,14 +352,44 @@ export function registerIPCHandlers(): void {
   ipcMain.handle(
     'sftp:uploadDir',
     async (_event, connId: string, localDir: string, remoteDir: string) => {
-      return sftpClient.uploadDir(connId, localDir, remoteDir);
+      const id = crypto.randomUUID();
+      const transfer: TransferItem = {
+        id,
+        protocol: 'sftp',
+        connectionId: connId,
+        entryType: 'directory',
+        direction: 'upload',
+        localPath: localDir,
+        remotePath: remoteDir,
+        fileName: path.basename(localDir) || localDir,
+        size: 0,
+        transferred: 0,
+        status: 'queued',
+      };
+      addTransfer(transfer);
+      return id;
     },
   );
 
   ipcMain.handle(
     'sftp:downloadDir',
     async (_event, connId: string, remoteDir: string, localDir: string) => {
-      return sftpClient.downloadDir(connId, remoteDir, localDir);
+      const id = crypto.randomUUID();
+      const transfer: TransferItem = {
+        id,
+        protocol: 'sftp',
+        connectionId: connId,
+        entryType: 'directory',
+        direction: 'download',
+        localPath: localDir,
+        remotePath: remoteDir,
+        fileName: path.posix.basename(remoteDir) || remoteDir,
+        size: 0,
+        transferred: 0,
+        status: 'queued',
+      };
+      addTransfer(transfer);
+      return id;
     },
   );
 
@@ -210,7 +428,9 @@ export function registerIPCHandlers(): void {
 
       const transfer: TransferItem = {
         id,
+        protocol: 'sftp',
         connectionId: connId,
+        entryType: 'file',
         direction,
         localPath,
         remotePath,
@@ -221,19 +441,36 @@ export function registerIPCHandlers(): void {
         startedAt: Date.now(),
       };
       addTransfer(transfer);
-
+      runningTransferIds.add(transfer.id);
+      const controller = new AbortController();
+      activeTransferControllers.set(transfer.id, controller);
       sftpClient
         .resumeTransfer(connId, direction, localPath, remotePath, (transferred, total) => {
+          if (transfer.status === 'cancelled') return;
           transfer.transferred = transferred;
           transfer.size = total;
-        })
+        }, controller.signal)
         .then(() => {
+          if (transfer.status === 'cancelled') return;
           transfer.status = 'completed';
           transfer.completedAt = Date.now();
         })
         .catch((err) => {
+          if (isAbortError(err)) {
+            transfer.status = 'cancelled';
+            transfer.completedAt = transfer.completedAt ?? Date.now();
+            transfer.error = undefined;
+            return;
+          }
+          if (transfer.status === 'cancelled') return;
           transfer.status = 'failed';
           transfer.error = err.message;
+        })
+        .finally(() => {
+          runningTransferIds.delete(transfer.id);
+          activeTransferControllers.delete(transfer.id);
+          trimCompletedTransfers();
+          scheduleTransfers();
         });
 
       return id;
@@ -263,31 +500,18 @@ export function registerIPCHandlers(): void {
 
       const transfer: TransferItem = {
         id,
+        protocol: 'ftp',
         connectionId: connId,
+        entryType: 'file',
         direction: 'upload',
         localPath,
         remotePath,
         fileName,
         size: stat.size,
         transferred: 0,
-        status: 'in-progress',
-        startedAt: Date.now(),
+        status: 'queued',
       };
       addTransfer(transfer);
-
-      ftpClient
-        .upload(connId, localPath, remotePath, (transferred, total) => {
-          transfer.transferred = transferred;
-          transfer.size = total;
-        })
-        .then(() => {
-          transfer.status = 'completed';
-          transfer.completedAt = Date.now();
-        })
-        .catch((err) => {
-          transfer.status = 'failed';
-          transfer.error = err.message;
-        });
 
       return id;
     },
@@ -301,31 +525,18 @@ export function registerIPCHandlers(): void {
 
       const transfer: TransferItem = {
         id,
+        protocol: 'ftp',
         connectionId: connId,
+        entryType: 'file',
         direction: 'download',
         localPath,
         remotePath,
         fileName,
         size: 0,
         transferred: 0,
-        status: 'in-progress',
-        startedAt: Date.now(),
+        status: 'queued',
       };
       addTransfer(transfer);
-
-      ftpClient
-        .download(connId, remotePath, localPath, (transferred, total) => {
-          transfer.transferred = transferred;
-          transfer.size = total;
-        })
-        .then(() => {
-          transfer.status = 'completed';
-          transfer.completedAt = Date.now();
-        })
-        .catch((err) => {
-          transfer.status = 'failed';
-          transfer.error = err.message;
-        });
 
       return id;
     },
@@ -346,17 +557,51 @@ export function registerIPCHandlers(): void {
     return ftpClient.del(connId, targetPath);
   });
 
+  ipcMain.handle('ftp:stat', async (_event, connId: string, targetPath: string) => {
+    return ftpClient.stat(connId, targetPath);
+  });
+
   ipcMain.handle(
     'ftp:uploadDir',
     async (_event, connId: string, localDir: string, remoteDir: string) => {
-      return ftpClient.uploadDir(connId, localDir, remoteDir);
+      const id = crypto.randomUUID();
+      const transfer: TransferItem = {
+        id,
+        protocol: 'ftp',
+        connectionId: connId,
+        entryType: 'directory',
+        direction: 'upload',
+        localPath: localDir,
+        remotePath: remoteDir,
+        fileName: path.basename(localDir) || localDir,
+        size: 0,
+        transferred: 0,
+        status: 'queued',
+      };
+      addTransfer(transfer);
+      return id;
     },
   );
 
   ipcMain.handle(
     'ftp:downloadDir',
     async (_event, connId: string, remoteDir: string, localDir: string) => {
-      return ftpClient.downloadDir(connId, remoteDir, localDir);
+      const id = crypto.randomUUID();
+      const transfer: TransferItem = {
+        id,
+        protocol: 'ftp',
+        connectionId: connId,
+        entryType: 'directory',
+        direction: 'download',
+        localPath: localDir,
+        remotePath: remoteDir,
+        fileName: path.posix.basename(remoteDir) || remoteDir,
+        size: 0,
+        transferred: 0,
+        status: 'queued',
+      };
+      addTransfer(transfer);
+      return id;
     },
   );
 
@@ -388,7 +633,9 @@ export function registerIPCHandlers(): void {
 
       const transfer: TransferItem = {
         id,
+        protocol: 'ftp',
         connectionId: connId,
+        entryType: 'file',
         direction,
         localPath,
         remotePath,
@@ -399,19 +646,36 @@ export function registerIPCHandlers(): void {
         startedAt: Date.now(),
       };
       addTransfer(transfer);
-
+      runningTransferIds.add(transfer.id);
+      const controller = new AbortController();
+      activeTransferControllers.set(transfer.id, controller);
       ftpClient
         .resumeTransfer(connId, direction, localPath, remotePath, (transferred, total) => {
+          if (transfer.status === 'cancelled') return;
           transfer.transferred = transferred;
           transfer.size = total;
-        })
+        }, controller.signal)
         .then(() => {
+          if (transfer.status === 'cancelled') return;
           transfer.status = 'completed';
           transfer.completedAt = Date.now();
         })
         .catch((err) => {
+          if (isAbortError(err)) {
+            transfer.status = 'cancelled';
+            transfer.completedAt = transfer.completedAt ?? Date.now();
+            transfer.error = undefined;
+            return;
+          }
+          if (transfer.status === 'cancelled') return;
           transfer.status = 'failed';
           transfer.error = err.message;
+        })
+        .finally(() => {
+          runningTransferIds.delete(transfer.id);
+          activeTransferControllers.delete(transfer.id);
+          trimCompletedTransfers();
+          scheduleTransfers();
         });
 
       return id;
@@ -441,31 +705,18 @@ export function registerIPCHandlers(): void {
 
       const transfer: TransferItem = {
         id,
+        protocol: 's3',
         connectionId: connId,
+        entryType: 'file',
         direction: 'upload',
         localPath,
         remotePath,
         fileName,
         size: stat.size,
         transferred: 0,
-        status: 'in-progress',
-        startedAt: Date.now(),
+        status: 'queued',
       };
       addTransfer(transfer);
-
-      s3Client
-        .upload(connId, localPath, remotePath, (transferred, total) => {
-          transfer.transferred = transferred;
-          transfer.size = total;
-        })
-        .then(() => {
-          transfer.status = 'completed';
-          transfer.completedAt = Date.now();
-        })
-        .catch((err) => {
-          transfer.status = 'failed';
-          transfer.error = err.message;
-        });
 
       return id;
     },
@@ -479,31 +730,18 @@ export function registerIPCHandlers(): void {
 
       const transfer: TransferItem = {
         id,
+        protocol: 's3',
         connectionId: connId,
+        entryType: 'file',
         direction: 'download',
         localPath,
         remotePath,
         fileName,
         size: 0,
         transferred: 0,
-        status: 'in-progress',
-        startedAt: Date.now(),
+        status: 'queued',
       };
       addTransfer(transfer);
-
-      s3Client
-        .download(connId, remotePath, localPath, (transferred, total) => {
-          transfer.transferred = transferred;
-          transfer.size = total;
-        })
-        .then(() => {
-          transfer.status = 'completed';
-          transfer.completedAt = Date.now();
-        })
-        .catch((err) => {
-          transfer.status = 'failed';
-          transfer.error = err.message;
-        });
 
       return id;
     },
@@ -524,17 +762,51 @@ export function registerIPCHandlers(): void {
     return s3Client.del(connId, key);
   });
 
+  ipcMain.handle('s3:stat', async (_event, connId: string, targetPath: string) => {
+    return s3Client.stat(connId, targetPath);
+  });
+
   ipcMain.handle(
     's3:uploadDir',
     async (_event, connId: string, localDir: string, remoteDir: string) => {
-      return s3Client.uploadDir(connId, localDir, remoteDir);
+      const id = crypto.randomUUID();
+      const transfer: TransferItem = {
+        id,
+        protocol: 's3',
+        connectionId: connId,
+        entryType: 'directory',
+        direction: 'upload',
+        localPath: localDir,
+        remotePath: remoteDir,
+        fileName: path.basename(localDir) || localDir,
+        size: 0,
+        transferred: 0,
+        status: 'queued',
+      };
+      addTransfer(transfer);
+      return id;
     },
   );
 
   ipcMain.handle(
     's3:downloadDir',
     async (_event, connId: string, remoteDir: string, localDir: string) => {
-      return s3Client.downloadDir(connId, remoteDir, localDir);
+      const id = crypto.randomUUID();
+      const transfer: TransferItem = {
+        id,
+        protocol: 's3',
+        connectionId: connId,
+        entryType: 'directory',
+        direction: 'download',
+        localPath: localDir,
+        remotePath: remoteDir,
+        fileName: path.posix.basename(remoteDir) || remoteDir,
+        size: 0,
+        transferred: 0,
+        status: 'queued',
+      };
+      addTransfer(transfer);
+      return id;
     },
   );
 
@@ -551,10 +823,18 @@ export function registerIPCHandlers(): void {
     return [...transferQueue];
   });
 
+  ipcMain.handle('transfer:getState', async () => {
+    return getTransferState();
+  });
+
   ipcMain.handle('transfer:cancel', async (_event, transferId: string) => {
     const t = transferQueue.find((item) => item.id === transferId);
     if (t && (t.status === 'queued' || t.status === 'in-progress')) {
       t.status = 'cancelled';
+      t.completedAt = Date.now();
+      activeTransferControllers.get(transferId)?.abort();
+      trimCompletedTransfers();
+      scheduleTransfers();
     }
   });
 
@@ -564,8 +844,60 @@ export function registerIPCHandlers(): void {
       t.status = 'queued';
       t.error = undefined;
       t.transferred = 0;
-      // NOTE: actual retry logic would re-dispatch the transfer here.
-      // For now we just reset the status so the UI can trigger a new transfer.
+      t.startedAt = undefined;
+      t.completedAt = undefined;
+      scheduleTransfers();
+    }
+  });
+
+  ipcMain.handle('transfer:setMaxConcurrent', async (_event, maxConcurrent: number) => {
+    const nextValue = Math.max(1, Math.min(5, Math.floor(maxConcurrent)));
+    transferSettings.maxConcurrent = nextValue;
+    scheduleTransfers();
+    return transferSettings.maxConcurrent;
+  });
+
+  ipcMain.handle('transfer:setPaused', async (_event, paused: boolean) => {
+    transferSettings.paused = setTransferPaused(paused);
+    if (!paused) {
+      scheduleTransfers();
+    }
+    return transferSettings.paused;
+  });
+
+  ipcMain.handle('transfer:setSpeedLimit', async (_event, speedLimitMbps: number | null) => {
+    const nextValue =
+      typeof speedLimitMbps === 'number' && Number.isFinite(speedLimitMbps)
+        ? Math.max(0.1, Math.min(1000, speedLimitMbps))
+        : null;
+    transferSettings.speedLimitMbps = setTransferSpeedLimit(nextValue);
+    return transferSettings.speedLimitMbps;
+  });
+
+  ipcMain.handle('transfer:moveToTop', async (_event, transferId: string) => {
+    const currentIndex = transferQueue.findIndex((item) => item.id === transferId);
+    if (currentIndex === -1) return false;
+
+    const [item] = transferQueue.splice(currentIndex, 1);
+    const insertionIndex = transferQueue.findIndex((candidate) => candidate.status === 'queued');
+    if (insertionIndex === -1) {
+      transferQueue.push(item);
+    } else {
+      transferQueue.splice(insertionIndex, 0, item);
+    }
+    scheduleTransfers();
+    return true;
+  });
+
+  ipcMain.handle('transfer:clearFinished', async () => {
+    for (let i = transferQueue.length - 1; i >= 0; i -= 1) {
+      const item = transferQueue[i];
+      if (
+        (item.status === 'completed' || item.status === 'cancelled') &&
+        !runningTransferIds.has(item.id)
+      ) {
+        transferQueue.splice(i, 1);
+      }
     }
   });
 
@@ -581,14 +913,7 @@ export function registerIPCHandlers(): void {
 
       const fullPath = path.join(dirPath, entry.name);
       try {
-        const stat = fs.statSync(fullPath);
-        result.push({
-          name: entry.name,
-          path: fullPath,
-          size: stat.size,
-          modifiedAt: stat.mtimeMs,
-          isDirectory: stat.isDirectory(),
-        });
+        result.push(toLocalFileEntry(fullPath));
       } catch {
         // Skip files we can't stat (permission errors, etc.)
       }
@@ -609,6 +934,26 @@ export function registerIPCHandlers(): void {
 
   ipcMain.handle('fs:mkdir', async (_event, dirPath: string) => {
     fs.mkdirSync(dirPath, { recursive: true });
+  });
+
+  ipcMain.handle('fs:rename', async (_event, oldPath: string, newPath: string) => {
+    fs.renameSync(oldPath, newPath);
+  });
+
+  ipcMain.handle('fs:delete', async (_event, targetPath: string) => {
+    fs.rmSync(targetPath, { recursive: true, force: false });
+  });
+
+  ipcMain.handle('fs:readTextFile', async (_event, filePath: string) => {
+    return fs.readFileSync(filePath, 'utf-8');
+  });
+
+  ipcMain.handle('fs:writeTextFile', async (_event, filePath: string, content: string) => {
+    fs.writeFileSync(filePath, content, 'utf-8');
+  });
+
+  ipcMain.handle('fs:stat', async (_event, targetPath: string) => {
+    return statLocalEntry(targetPath);
   });
 
   // ── Bookmarks ─────────────────────────────────────────────
@@ -669,13 +1014,7 @@ export function registerIPCHandlers(): void {
       const fileName = path.basename(remotePath);
       const tmpPath = path.join(tmpDir, `${Date.now()}-${fileName}`);
 
-      if (protocol === 'sftp') {
-        await sftpClient.download(connId, remotePath, tmpPath);
-      } else if (protocol === 'ftp') {
-        await ftpClient.download(connId, remotePath, tmpPath);
-      } else if (protocol === 's3') {
-        await s3Client.download(connId, remotePath, tmpPath);
-      }
+      await downloadRemoteToTemp(protocol as 'sftp' | 's3' | 'ftp', connId, remotePath, tmpPath);
 
       return tmpPath;
     },
@@ -738,25 +1077,16 @@ export function registerIPCHandlers(): void {
   );
 
   ipcMain.handle(
+    'app:computeRemoteChecksum',
+    async (_event, protocol: 'sftp' | 's3' | 'ftp', connId: string, remotePath: string, algorithm: string) => {
+      return computeRemoteChecksum(protocol, connId, remotePath, algorithm);
+    },
+  );
+
+  ipcMain.handle(
     'sftp:computeRemoteChecksum',
     async (_event, connId: string, remotePath: string, algorithm: string) => {
-      // Download file to temp, compute hash, clean up
-      const tmpDir = path.join(app.getPath('temp'), 'bridgefile-checksum');
-      fs.mkdirSync(tmpDir, { recursive: true });
-
-      const fileName = path.basename(remotePath);
-      const tmpPath = path.join(tmpDir, `${Date.now()}-${fileName}`);
-
-      await sftpClient.download(connId, remotePath, tmpPath);
-
-      const hash = crypto.createHash(algorithm);
-      const data = fs.readFileSync(tmpPath);
-      hash.update(data);
-      const result = hash.digest('hex');
-
-      try { fs.unlinkSync(tmpPath); } catch { /* ignore */ }
-
-      return result;
+      return computeRemoteChecksum('sftp', connId, remotePath, algorithm);
     },
   );
 

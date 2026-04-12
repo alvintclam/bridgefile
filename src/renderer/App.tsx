@@ -4,6 +4,7 @@ import ConnectionManager from './components/ConnectionManager';
 import type { ConnectionProfile } from './components/ConnectionManager';
 import BookmarkBar from './components/BookmarkBar';
 import FilePane from './components/FilePane';
+import type { ExternalDropItem } from './components/FilePane';
 import TransferQueue from './components/TransferQueue';
 import LogPanel, { logConnected, logDisconnected, logError } from './components/LogPanel';
 import TabBar from './components/TabBar';
@@ -21,10 +22,68 @@ interface UpdateInfo {
   downloadUrl: string;
 }
 
+interface SelectedFileState {
+  name: string;
+  size?: number;
+  permissions?: string;
+  localPath?: string;
+  remotePath?: string;
+}
+
+interface SyncRoots {
+  local: string;
+  remote: string;
+}
+
+interface QueueTransferState {
+  id: string;
+  connectionId: string;
+  direction: 'upload' | 'download';
+  status: string;
+}
+
 let tabIdCounter = 0;
 function nextTabId(): string {
   tabIdCounter += 1;
   return `tab-${tabIdCounter}`;
+}
+
+function normalizePath(path: string): string {
+  if (!path) return '/';
+  if (path === '/') return '/';
+  return path.replace(/\/+$/, '') || '/';
+}
+
+function joinChildPath(basePath: string, name: string): string {
+  const normalizedBase = normalizePath(basePath);
+  return normalizedBase === '/' ? `/${name}` : `${normalizedBase}/${name}`;
+}
+
+function getRelativePath(rootPath: string, targetPath: string): string | null {
+  const normalizedRoot = normalizePath(rootPath);
+  const normalizedTarget = normalizePath(targetPath);
+
+  if (normalizedRoot === '/') {
+    return normalizedTarget === '/' ? '' : normalizedTarget.slice(1);
+  }
+  if (normalizedTarget === normalizedRoot) {
+    return '';
+  }
+  if (normalizedTarget.startsWith(`${normalizedRoot}/`)) {
+    return normalizedTarget.slice(normalizedRoot.length + 1);
+  }
+  return null;
+}
+
+function applyRelativePath(rootPath: string, relativePath: string): string {
+  const normalizedRoot = normalizePath(rootPath);
+  if (!relativePath) return normalizedRoot;
+  return normalizedRoot === '/' ? `/${relativePath}` : `${normalizedRoot}/${relativePath}`;
+}
+
+function isMissingPathError(error: unknown): boolean {
+  const message = error instanceof Error ? error.message : String(error);
+  return /ENOENT|not found|no such file|no such key|550/i.test(message);
 }
 
 export default function App() {
@@ -65,9 +124,19 @@ export default function App() {
     return () => clearTimeout(timer);
   }, []);
 
+  useEffect(() => {
+    if (typeof window === 'undefined' || !window.bridgefile) return;
+
+    window.bridgefile.fs
+      .getHomeDir()
+      .then((homeDir: string) => setLocalPath(homeDir))
+      .catch(() => setLocalPath('/'));
+  }, []);
+
   // ── Synchronized browsing ───────────────────────────────────
   const [syncBrowsing, setSyncBrowsing] = useState(false);
   const [localPath, setLocalPath] = useState<string | null>(null);
+  const [syncRoots, setSyncRoots] = useState<SyncRoots | null>(null);
 
   // ── UI state ────────────────────────────────────────────────
   const [theme, setTheme] = useState<'dark' | 'light'>('dark');
@@ -83,11 +152,15 @@ export default function App() {
   const [showEditor, setShowEditor] = useState(false);
   const [showChecksum, setShowChecksum] = useState(false);
   const [showPermissions, setShowPermissions] = useState(false);
-  const [selectedFile, setSelectedFile] = useState<{ path: string; name: string; size?: number; permissions?: string } | null>(null);
+  const [selectedFile, setSelectedFile] = useState<SelectedFileState | null>(null);
+  const [localRefreshToken, setLocalRefreshToken] = useState(0);
+  const [remoteRefreshToken, setRemoteRefreshToken] = useState(0);
+  const [transferBadgeCount, setTransferBadgeCount] = useState(0);
 
   const isDraggingBottom = useRef(false);
   const isDraggingDivider = useRef(false);
   const containerRef = useRef<HTMLDivElement>(null);
+  const seenCompletedTransfers = useRef<Map<string, string>>(new Map());
 
   const handleConnect = (profile: ConnectionProfile, connId: string) => {
     const tabName =
@@ -189,55 +262,28 @@ export default function App() {
     (newLocalPath: string) => {
       setLocalPath(newLocalPath);
 
-      if (syncBrowsing && activeTab && remotePath) {
-        // Extract the relative path segment navigated to
-        // e.g., if local goes from /Users/foo to /Users/foo/docs, relative = "docs"
-        // Then we apply the same relative path to remote
-        if (localPath) {
-          const localNorm = localPath.endsWith('/') ? localPath : localPath + '/';
-          if (newLocalPath.startsWith(localNorm)) {
-            const relative = newLocalPath.slice(localNorm.length);
-            if (relative) {
-              const newRemote = remotePath.endsWith('/')
-                ? remotePath + relative
-                : remotePath + '/' + relative;
-              setRemotePath(newRemote);
-            }
-          } else {
-            // Navigating up or to a completely different path
-            const segments = newLocalPath.split('/').filter(Boolean);
-            const lastSegment = segments[segments.length - 1];
-            if (lastSegment) {
-              const remoteBase = remotePath.endsWith('/')
-                ? remotePath
-                : remotePath.replace(/\/[^/]*$/, '/');
-              setRemotePath(remoteBase + lastSegment);
-            }
-          }
+      if (syncBrowsing && syncRoots) {
+        const relativePath = getRelativePath(syncRoots.local, newLocalPath);
+        if (relativePath !== null) {
+          setRemotePath(applyRelativePath(syncRoots.remote, relativePath));
         }
       }
     },
-    [syncBrowsing, activeTab, remotePath, localPath, setRemotePath],
+    [syncBrowsing, syncRoots, setRemotePath],
   );
 
   const handleRemoteNavigate = useCallback(
     (newRemotePath: string) => {
       setRemotePath(newRemotePath);
 
-      if (syncBrowsing && localPath && remotePath) {
-        const remoteNorm = remotePath.endsWith('/') ? remotePath : remotePath + '/';
-        if (newRemotePath.startsWith(remoteNorm)) {
-          const relative = newRemotePath.slice(remoteNorm.length);
-          if (relative) {
-            const newLocal = localPath.endsWith('/')
-              ? localPath + relative
-              : localPath + '/' + relative;
-            setLocalPath(newLocal);
-          }
+      if (syncBrowsing && syncRoots) {
+        const relativePath = getRelativePath(syncRoots.remote, newRemotePath);
+        if (relativePath !== null) {
+          setLocalPath(applyRelativePath(syncRoots.local, relativePath));
         }
       }
     },
-    [syncBrowsing, localPath, remotePath, setRemotePath],
+    [syncBrowsing, syncRoots, setRemotePath],
   );
 
   // ── Bottom panel resize ─────────────────────────────────────
@@ -289,6 +335,251 @@ export default function App() {
     ? (protocol.toLowerCase() as 'sftp' | 's3' | 'ftp')
     : undefined;
 
+  const handleToggleSyncBrowsing = useCallback(() => {
+    if (!syncBrowsing) {
+      if (localPath && remotePath) {
+        setSyncRoots({
+          local: normalizePath(localPath),
+          remote: normalizePath(remotePath),
+        });
+      }
+    } else {
+      setSyncRoots(null);
+    }
+
+    setSyncBrowsing((prev) => !prev);
+  }, [syncBrowsing, localPath, remotePath]);
+
+  useEffect(() => {
+    seenCompletedTransfers.current = new Map();
+  }, [connectionId]);
+
+  useEffect(() => {
+    if (typeof window === 'undefined' || !window.bridgefile) return;
+
+    const pollQueue = async () => {
+      try {
+        const queue = await window.bridgefile.transfer.getQueue() as QueueTransferState[];
+        setTransferBadgeCount(
+          queue.filter((item) => item.status !== 'completed' && item.status !== 'cancelled').length,
+        );
+
+        if (!connectionId) {
+          return;
+        }
+
+        const nextSeen = new Map(seenCompletedTransfers.current);
+        let refreshLocal = false;
+        let refreshRemote = false;
+
+        for (const item of queue) {
+          if (item.connectionId !== connectionId) continue;
+
+          if (item.status === 'completed') {
+            if (nextSeen.get(item.id) !== 'completed') {
+              if (item.direction === 'upload') {
+                refreshRemote = true;
+              } else {
+                refreshLocal = true;
+              }
+            }
+            nextSeen.set(item.id, 'completed');
+          } else {
+            nextSeen.set(item.id, item.status);
+          }
+        }
+
+        seenCompletedTransfers.current = nextSeen;
+
+        if (refreshRemote) {
+          setRemoteRefreshToken((token) => token + 1);
+        }
+        if (refreshLocal) {
+          setLocalRefreshToken((token) => token + 1);
+        }
+      } catch {
+        // Ignore polling failures
+      }
+    };
+
+    pollQueue();
+    const intervalId = window.setInterval(pollQueue, 750);
+    return () => window.clearInterval(intervalId);
+  }, [connectionId]);
+
+  const getLocalEntryIfExists = useCallback(async (targetPath: string) => {
+    try {
+      return await window.bridgefile.fs.stat(targetPath);
+    } catch (error) {
+      if (isMissingPathError(error)) {
+        return null;
+      }
+      throw error;
+    }
+  }, []);
+
+  const getRemoteEntryIfExists = useCallback(
+    async (targetPath: string) => {
+      if (!remoteProtocol || !connectionId) return null;
+      try {
+        return await window.bridgefile[remoteProtocol].stat(connectionId, targetPath);
+      } catch (error) {
+        if (isMissingPathError(error)) {
+          return null;
+        }
+        throw error;
+      }
+    },
+    [remoteProtocol, connectionId],
+  );
+
+  const confirmDestinationTransfer = useCallback(
+    async (
+      destinationSide: 'local' | 'remote',
+      targetPath: string,
+      sourceName: string,
+      sourceIsDirectory: boolean,
+    ) => {
+      const existingEntry =
+        destinationSide === 'local'
+          ? await getLocalEntryIfExists(targetPath)
+          : await getRemoteEntryIfExists(targetPath);
+
+      if (!existingEntry) {
+        return true;
+      }
+
+      const sourceType = sourceIsDirectory ? 'folder' : 'file';
+      const destinationType = existingEntry.isDirectory ? 'folder' : 'file';
+
+      if (existingEntry.isDirectory !== sourceIsDirectory) {
+        throw new Error(
+          `Cannot transfer "${sourceName}" because ${targetPath} is an existing ${destinationType}.`,
+        );
+      }
+
+      const destinationLabel = destinationSide === 'local' ? 'local' : 'remote';
+      const message = sourceIsDirectory
+        ? `The ${destinationLabel} folder "${targetPath}" already exists.\n\nContinue and merge/overwrite its contents?`
+        : `The ${destinationLabel} file "${targetPath}" already exists.\n\nReplace it with "${sourceName}"?`;
+
+      const shouldContinue =
+        typeof window === 'undefined' || typeof window.confirm !== 'function'
+          ? true
+          : window.confirm(message);
+
+      if (!shouldContinue) {
+        logError(`Skipped ${sourceType} "${sourceName}" because destination already exists: ${targetPath}`);
+      }
+
+      return shouldContinue;
+    },
+    [getLocalEntryIfExists, getRemoteEntryIfExists],
+  );
+
+  // ── File transfer handler (sequential to avoid FTP single-connection issues) ──
+  const handleTransfer = useCallback(
+    async (
+      direction: 'upload' | 'download',
+      files: { name: string; isDirectory: boolean }[],
+      sourcePath: string,
+    ) => {
+      if (!remoteProtocol || !connectionId) return;
+      const api = typeof window !== 'undefined' && window.bridgefile
+        ? window.bridgefile[remoteProtocol]
+        : null;
+      if (!api) return;
+
+      const currentRemotePath = normalizePath(remotePath || '/');
+      const currentLocalPath = normalizePath(localPath || '/');
+
+      for (const file of files) {
+        try {
+          if (direction === 'upload') {
+            const local = joinChildPath(sourcePath, file.name);
+            const remote = joinChildPath(currentRemotePath, file.name);
+            const shouldTransfer = await confirmDestinationTransfer(
+              'remote',
+              remote,
+              file.name,
+              file.isDirectory,
+            );
+            if (!shouldTransfer) {
+              continue;
+            }
+            if (file.isDirectory) {
+              await api.uploadDir(connectionId, local, remote);
+            } else {
+              await api.upload(connectionId, local, remote);
+            }
+          } else {
+            const remote = joinChildPath(sourcePath, file.name);
+            const local = joinChildPath(currentLocalPath, file.name);
+            const shouldTransfer = await confirmDestinationTransfer(
+              'local',
+              local,
+              file.name,
+              file.isDirectory,
+            );
+            if (!shouldTransfer) {
+              continue;
+            }
+            if (file.isDirectory) {
+              await api.downloadDir(connectionId, remote, local);
+            } else {
+              await api.download(connectionId, remote, local);
+            }
+          }
+        } catch (err: unknown) {
+          const message = err instanceof Error ? err.message : String(err);
+          logError(`Transfer failed for ${file.name}: ${message}`);
+        }
+      }
+    },
+    [remoteProtocol, connectionId, remotePath, localPath, confirmDestinationTransfer],
+  );
+
+  // ── Desktop drop handler (sequential) ──────────────────────
+  const handleDesktopDrop = useCallback(
+    async (items: ExternalDropItem[], targetPath: string) => {
+      if (!remoteProtocol || !connectionId) return;
+      const bridgefile = typeof window !== 'undefined' && window.bridgefile
+        ? window.bridgefile
+        : null;
+      const api = bridgefile
+        ? window.bridgefile[remoteProtocol]
+        : null;
+      if (!api || !bridgefile) return;
+
+      for (const item of items) {
+        try {
+          const fileName = item.name || item.path.split(/[\\/]/).pop() || item.path;
+          const remote = joinChildPath(targetPath, fileName);
+          const localEntry = typeof item.isDirectory === 'boolean'
+            ? { isDirectory: item.isDirectory }
+            : await bridgefile.fs.stat(item.path);
+          const shouldTransfer = await confirmDestinationTransfer(
+            'remote',
+            remote,
+            fileName,
+            localEntry.isDirectory,
+          );
+          if (!shouldTransfer) {
+            continue;
+          }
+          if (localEntry.isDirectory) {
+            await api.uploadDir(connectionId, item.path, remote);
+          } else {
+            await api.upload(connectionId, item.path, remote);
+          }
+        } catch (err: unknown) {
+          const message = err instanceof Error ? err.message : String(err);
+          logError(`Desktop drop upload failed for ${item.name}: ${message}`);
+        }
+      }
+    },
+    [remoteProtocol, connectionId, confirmDestinationTransfer],
+  );
   return (
     <div
       className={`flex flex-col h-screen select-none overflow-hidden ${
@@ -335,7 +626,7 @@ export default function App() {
         theme={theme}
         onToggleTheme={toggleTheme}
         syncBrowsing={syncBrowsing}
-        onToggleSyncBrowsing={() => setSyncBrowsing((s) => !s)}
+        onToggleSyncBrowsing={handleToggleSyncBrowsing}
       />
 
       {/* Tab bar for multi-session tabs */}
@@ -352,7 +643,7 @@ export default function App() {
       <BookmarkBar
         currentPath={remotePath}
         connectionId={connectionId}
-        onNavigate={(path) => setRemotePath(path)}
+        onNavigate={handleRemoteNavigate}
       />
 
       {/* Middle: Dual pane file browsers */}
@@ -363,10 +654,26 @@ export default function App() {
             side="local"
             label="Local"
             onNavigate={handleLocalNavigate}
-            syncPath={syncBrowsing ? localPath ?? undefined : undefined}
+            syncPath={localPath ?? undefined}
+            refreshToken={localRefreshToken}
+            onTransfer={handleTransfer}
             onCompare={() => setShowCompare(true)}
             onSearch={() => setShowSearch(true)}
-            onChecksum={(file) => { setSelectedFile(file); setShowChecksum(true); }}
+            onEditFile={(file) => {
+              setSelectedFile({
+                name: file.name,
+                size: file.size,
+                localPath: file.path,
+              });
+              setShowEditor(true);
+            }}
+            onChecksum={(file) => {
+              setSelectedFile({
+                name: file.name,
+                localPath: file.path,
+              });
+              setShowChecksum(true);
+            }}
           />
         </div>
 
@@ -386,12 +693,38 @@ export default function App() {
             protocol={remoteProtocol}
             connectionId={connectionId ?? undefined}
             onNavigate={handleRemoteNavigate}
-            syncPath={syncBrowsing ? remotePath ?? undefined : undefined}
+            syncPath={remotePath ?? undefined}
+            refreshToken={remoteRefreshToken}
+            onTransfer={handleTransfer}
+            onDesktopDrop={handleDesktopDrop}
             onCompare={() => setShowCompare(true)}
             onSearch={() => setShowSearch(true)}
-            onEditFile={(file) => { setSelectedFile(file); setShowEditor(true); }}
-            onChecksum={(file) => { setSelectedFile(file); setShowChecksum(true); }}
-            onPermissions={(file) => { setSelectedFile(file); setShowPermissions(true); }}
+            onEditFile={(file) => {
+              setSelectedFile({
+                name: file.name,
+                size: file.size,
+                remotePath: file.path,
+              });
+              setShowEditor(true);
+            }}
+            onChecksum={remoteProtocol
+              ? (file) => {
+                  setSelectedFile({
+                    name: file.name,
+                    remotePath: file.path,
+                  });
+                  setShowChecksum(true);
+                }
+              : undefined
+            }
+            onPermissions={(file) => {
+              setSelectedFile({
+                name: file.name,
+                permissions: file.permissions,
+                remotePath: file.path,
+              });
+              setShowPermissions(true);
+            }}
           />
         </div>
       </div>
@@ -421,7 +754,7 @@ export default function App() {
                 if (bottomCollapsed) setBottomCollapsed(false);
               }}
               label="Transfers"
-              badge={5}
+              badge={transferBadgeCount}
             />
             <BottomTabButton
               active={bottomTab === 'log'}
@@ -489,7 +822,7 @@ export default function App() {
         protocol={remoteProtocol}
         connectionId={connectionId ?? undefined}
         currentPath={remotePath ?? '/'}
-        onNavigate={(path) => setRemotePath(path)}
+        onNavigate={handleRemoteNavigate}
       />
 
       {/* File Editor dialog */}
@@ -497,9 +830,10 @@ export default function App() {
         <FileEditor
           isOpen={showEditor}
           onClose={() => { setShowEditor(false); setSelectedFile(null); }}
-          protocol={remoteProtocol}
-          connectionId={connectionId ?? undefined}
-          remotePath={selectedFile.path}
+          protocol={selectedFile.remotePath ? remoteProtocol ?? undefined : undefined}
+          connectionId={selectedFile.remotePath ? connectionId ?? undefined : undefined}
+          localPath={selectedFile.localPath}
+          remotePath={selectedFile.remotePath}
           fileName={selectedFile.name}
           fileSize={selectedFile.size ?? 0}
         />
@@ -510,24 +844,27 @@ export default function App() {
         <ChecksumDialog
           isOpen={showChecksum}
           onClose={() => { setShowChecksum(false); setSelectedFile(null); }}
-          remotePath={selectedFile.path}
-          connectionId={connectionId ?? undefined}
+          protocol={selectedFile.remotePath ? remoteProtocol ?? undefined : undefined}
+          localPath={selectedFile.localPath}
+          remotePath={selectedFile.remotePath}
+          connectionId={selectedFile.remotePath ? connectionId ?? undefined : undefined}
           fileName={selectedFile.name}
         />
       )}
 
       {/* Permissions dialog */}
-      {showPermissions && selectedFile && connectionId && (
+      {showPermissions && selectedFile?.remotePath && connectionId && (
         <PermissionsDialog
           isOpen={showPermissions}
           onClose={() => { setShowPermissions(false); setSelectedFile(null); }}
           fileName={selectedFile.name}
           currentPermissions={selectedFile.permissions}
           connectionId={connectionId}
-          remotePath={selectedFile.path}
+          remotePath={selectedFile.remotePath}
           onApply={(mode: number) => {
-            if (connectionId) {
-              window.bridgefile.sftp.chmod(connectionId, selectedFile.path, mode).catch((err: unknown) => {
+            const remoteTarget = selectedFile.remotePath;
+            if (connectionId && remoteTarget) {
+              window.bridgefile.sftp.chmod(connectionId, remoteTarget, mode).catch((err: unknown) => {
                 logError(`chmod failed: ${err instanceof Error ? err.message : String(err)}`);
               });
             }

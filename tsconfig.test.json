@@ -1,0 +1,23 @@
+{
+  "extends": "./tsconfig.main.json",
+  "compilerOptions": {
+    "outDir": "./dist-test",
+    "rootDir": "./src",
+    "types": ["node"]
+  },
+  "include": [
+    "src/test/**/*.ts",
+    "src/main/protocols/**/*.ts",
+    "src/shared/**/*.ts"
+  ],
+  "exclude": [
+    "node_modules",
+    "dist",
+    "dist-test",
+    "src/main/main.ts",
+    "src/main/ipc-handlers.ts",
+    "src/main/store.ts",
+    "src/main/auto-updater.ts",
+    "src/main/preload.ts"
+  ]
+}

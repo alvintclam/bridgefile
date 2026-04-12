@@ -3,6 +3,7 @@ import React, { useState } from 'react';
 interface ChecksumDialogProps {
   isOpen: boolean;
   onClose: () => void;
+  protocol?: 'sftp' | 's3' | 'ftp';
   /** Local file path (for local checksum computation) */
   localPath?: string;
   /** Remote file path (for remote checksum computation) */
@@ -22,6 +23,7 @@ function isElectron(): boolean {
 export default function ChecksumDialog({
   isOpen,
   onClose,
+  protocol,
   localPath,
   remotePath,
   connectionId,
@@ -54,10 +56,10 @@ export default function ChecksumDialog({
         );
       }
 
-      if (remotePath && connectionId) {
+      if (remotePath && connectionId && protocol) {
         promises.push(
-          window.bridgefile.sftp
-            .computeRemoteChecksum(connectionId, remotePath, algorithm)
+          window.bridgefile.app
+            .computeRemoteChecksum(protocol, connectionId, remotePath, algorithm)
             .then((hash: string) => setRemoteHash(hash)),
         );
       }

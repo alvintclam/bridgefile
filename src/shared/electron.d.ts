@@ -2,6 +2,7 @@ import type {
   ConnectionProfile,
   FileEntry,
   TransferItem,
+  TransferQueueState,
   BookmarkEntry,
   SFTPConfig,
   FTPConfig,
@@ -26,8 +27,8 @@ export interface BridgeFileAPI {
     rename(connId: string, oldPath: string, newPath: string): Promise<void>;
     delete(connId: string, path: string): Promise<void>;
     stat(connId: string, path: string): Promise<FileEntry>;
-    uploadDir(connId: string, localDir: string, remoteDir: string): Promise<void>;
-    downloadDir(connId: string, remoteDir: string, localDir: string): Promise<void>;
+    uploadDir(connId: string, localDir: string, remoteDir: string): Promise<string>;
+    downloadDir(connId: string, remoteDir: string, localDir: string): Promise<string>;
     deleteDir(connId: string, dirPath: string): Promise<void>;
     chmod(connId: string, path: string, mode: number): Promise<void>;
     search(connId: string, basePath: string, pattern: string, recursive: boolean): Promise<FileEntry[]>;
@@ -44,8 +45,9 @@ export interface BridgeFileAPI {
     mkdir(connId: string, path: string): Promise<void>;
     rename(connId: string, oldPath: string, newPath: string): Promise<void>;
     delete(connId: string, path: string): Promise<void>;
-    uploadDir(connId: string, localDir: string, remoteDir: string): Promise<void>;
-    downloadDir(connId: string, remoteDir: string, localDir: string): Promise<void>;
+    stat(connId: string, path: string): Promise<FileEntry>;
+    uploadDir(connId: string, localDir: string, remoteDir: string): Promise<string>;
+    downloadDir(connId: string, remoteDir: string, localDir: string): Promise<string>;
     deleteDir(connId: string, dirPath: string): Promise<void>;
     search(connId: string, basePath: string, pattern: string, recursive: boolean): Promise<FileEntry[]>;
     resumeTransfer(connId: string, direction: 'upload' | 'download', localPath: string, remotePath: string): Promise<string>;
@@ -60,22 +62,34 @@ export interface BridgeFileAPI {
     mkdir(connId: string, path: string): Promise<void>;
     rename(connId: string, oldKey: string, newKey: string): Promise<void>;
     delete(connId: string, key: string): Promise<void>;
-    uploadDir(connId: string, localDir: string, remoteDir: string): Promise<void>;
-    downloadDir(connId: string, remoteDir: string, localDir: string): Promise<void>;
+    stat(connId: string, path: string): Promise<FileEntry>;
+    uploadDir(connId: string, localDir: string, remoteDir: string): Promise<string>;
+    downloadDir(connId: string, remoteDir: string, localDir: string): Promise<string>;
     deleteDir(connId: string, dirPath: string): Promise<void>;
     search(connId: string, prefix: string, pattern: string): Promise<FileEntry[]>;
   };
 
   transfer: {
     getQueue(): Promise<TransferItem[]>;
+    getState(): Promise<TransferQueueState>;
     cancelTransfer(transferId: string): Promise<void>;
     retryTransfer(transferId: string): Promise<void>;
+    setMaxConcurrent(maxConcurrent: number): Promise<number>;
+    setPaused(paused: boolean): Promise<boolean>;
+    setSpeedLimit(speedLimitMbps: number | null): Promise<number | null>;
+    moveToTop(transferId: string): Promise<boolean>;
+    clearFinished(): Promise<void>;
   };
 
   fs: {
     listLocal(dirPath: string): Promise<FileEntry[]>;
     getHomeDir(): Promise<string>;
     mkdir(dirPath: string): Promise<void>;
+    rename(oldPath: string, newPath: string): Promise<void>;
+    delete(targetPath: string): Promise<void>;
+    readTextFile(filePath: string): Promise<string>;
+    writeTextFile(filePath: string, content: string): Promise<void>;
+    stat(targetPath: string): Promise<FileEntry>;
   };
 
   bookmarks: {
@@ -89,6 +103,12 @@ export interface BridgeFileAPI {
     getPlatform(): Promise<string>;
     editRemoteFile(protocol: string, connId: string, remotePath: string): Promise<string>;
     saveRemoteFile(protocol: string, connId: string, remotePath: string, content: string): Promise<void>;
+    computeRemoteChecksum(
+      protocol: 'sftp' | 's3' | 'ftp',
+      connId: string,
+      remotePath: string,
+      algorithm: string,
+    ): Promise<string>;
     exportLogs(content: string): Promise<boolean>;
     checkForUpdates(): Promise<{ hasUpdate: boolean; latestVersion: string; downloadUrl: string; currentVersion: string }>;
     computeChecksum(filePath: string, algorithm: string): Promise<string>;

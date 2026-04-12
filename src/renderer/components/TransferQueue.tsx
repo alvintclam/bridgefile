@@ -3,17 +3,38 @@ import SpeedIndicator from './SpeedIndicator';
 import type { SpeedLimit } from './SpeedIndicator';
 import { t } from '../lib/i18n';
 
-export type TransferStatus = 'queued' | 'transferring' | 'completed' | 'failed' | 'paused';
+export type TransferStatus = 'queued' | 'transferring' | 'completed' | 'failed' | 'paused' | 'cancelled';
 
 export interface TransferItem {
   id: string;
   filename: string;
+  entryType: 'file' | 'directory';
   direction: 'upload' | 'download';
   size: number;
   transferred: number;
   speed: number; // bytes per second
   status: TransferStatus;
+  currentFile?: string;
   error?: string;
+}
+
+interface TransferQueueState {
+  items: {
+    id: string;
+    fileName: string;
+    entryType: 'file' | 'directory';
+    direction: 'upload' | 'download';
+    size: number;
+    transferred: number;
+    status: string;
+    currentFile?: string;
+    error?: string;
+    startedAt?: number;
+    completedAt?: number;
+  }[];
+  maxConcurrent: number;
+  paused: boolean;
+  speedLimitMbps: number | null;
 }
 
 function isElectron(): boolean {
@@ -24,18 +45,20 @@ function isElectron(): boolean {
 function mapIPCTransfer(raw: {
   id: string;
   fileName: string;
+  entryType: 'file' | 'directory';
   direction: 'upload' | 'download';
   size: number;
   transferred: number;
   status: string;
+  currentFile?: string;
   error?: string;
   startedAt?: number;
   completedAt?: number;
-}): TransferItem {
+}, queuePaused: boolean): TransferItem {
   let status: TransferStatus;
   switch (raw.status) {
     case 'in-progress':
-      status = 'transferring';
+      status = queuePaused ? 'paused' : 'transferring';
       break;
     case 'completed':
       status = 'completed';
@@ -44,10 +67,10 @@ function mapIPCTransfer(raw: {
       status = 'failed';
       break;
     case 'cancelled':
-      status = 'failed';
+      status = 'cancelled';
       break;
     default:
-      status = 'queued';
+      status = queuePaused ? 'paused' : 'queued';
   }
 
   // Estimate speed from transferred and startedAt
@@ -60,11 +83,13 @@ function mapIPCTransfer(raw: {
   return {
     id: raw.id,
     filename: raw.fileName,
+    entryType: raw.entryType,
     direction: raw.direction,
     size: raw.size,
     transferred: raw.transferred,
     speed,
     status,
+    currentFile: raw.currentFile,
     error: raw.error,
   };
 }
@@ -96,12 +121,20 @@ function formatElapsed(ms: number): string {
   return `${Math.floor(secs / 3600)}h ${Math.floor((secs % 3600) / 60)}m`;
 }
 
+function formatProgress(item: TransferItem): string {
+  if (item.entryType === 'directory') {
+    return `${Math.min(item.transferred, item.size)} / ${item.size} files`;
+  }
+  return `${formatSize(item.transferred)} / ${formatSize(item.size)}`;
+}
+
 const STATUS_STYLES: Record<TransferStatus, string> = {
   queued: 'bg-[#71717a]/15 text-[#71717a]',
   transferring: 'bg-[#3b82f6]/15 text-[#3b82f6]',
   completed: 'bg-emerald-500/15 text-emerald-400',
   failed: 'bg-red-500/15 text-red-400',
   paused: 'bg-amber-500/15 text-amber-400',
+  cancelled: 'bg-[#52525b]/15 text-[#a1a1aa]',
 };
 
 export default function TransferQueue() {
@@ -113,12 +146,15 @@ export default function TransferQueue() {
   const [startTime] = useState(Date.now());
   const intervalRef = useRef<ReturnType<typeof setInterval> | null>(null);
 
-  // Poll IPC for real transfer data
-  const fetchQueue = useCallback(async () => {
+  // Poll IPC for real transfer data and scheduler settings
+  const fetchQueueState = useCallback(async () => {
     if (!isElectron()) return;
     try {
-      const rawQueue = await window.bridgefile.transfer.getQueue();
-      setTransfers(rawQueue.map(mapIPCTransfer));
+      const state = await window.bridgefile.transfer.getState() as TransferQueueState;
+      setTransfers(state.items.map((item) => mapIPCTransfer(item, state.paused)));
+      setMaxConcurrent(state.maxConcurrent);
+      setAllPaused(state.paused);
+      setSpeedLimit(state.speedLimitMbps ?? 'unlimited');
     } catch {
       // Silently ignore polling errors
     }
@@ -128,10 +164,10 @@ export default function TransferQueue() {
     if (!isElectron()) return;
 
     // Initial fetch
-    fetchQueue();
+    fetchQueueState();
 
     // Poll every 500ms
-    intervalRef.current = setInterval(fetchQueue, 500);
+    intervalRef.current = setInterval(fetchQueueState, 500);
 
     return () => {
       if (intervalRef.current) {
@@ -139,7 +175,7 @@ export default function TransferQueue() {
         intervalRef.current = null;
       }
     };
-  }, [fetchQueue]);
+  }, [fetchQueueState]);
 
   // Close context menu on click outside
   useEffect(() => {
@@ -149,14 +185,25 @@ export default function TransferQueue() {
     return () => document.removeEventListener('mousedown', handleClick);
   }, [contextMenu]);
 
-  const clearCompleted = () => {
-    setTransfers(prev => prev.filter(t => t.status !== 'completed'));
+  const clearCompleted = async () => {
+    if (isElectron()) {
+      try {
+        await window.bridgefile.transfer.clearFinished();
+        await fetchQueueState();
+        return;
+      } catch {
+        // Fall through to local removal
+      }
+    }
+    setTransfers(prev => prev.filter(t => t.status !== 'completed' && t.status !== 'cancelled'));
   };
 
   const cancelTransfer = async (id: string) => {
     if (isElectron()) {
       try {
         await window.bridgefile.transfer.cancelTransfer(id);
+        await fetchQueueState();
+        return;
       } catch {
         // Fall through to local removal
       }
@@ -168,6 +215,7 @@ export default function TransferQueue() {
     if (isElectron()) {
       try {
         await window.bridgefile.transfer.retryTransfer(id);
+        await fetchQueueState();
         return;
       } catch {
         // Fall through to local retry
@@ -181,42 +229,61 @@ export default function TransferQueue() {
   };
 
   const moveToTop = useCallback((id: string) => {
-    setTransfers(prev => {
-      const idx = prev.findIndex(t => t.id === id);
-      if (idx <= 0) return prev;
-      const item = prev[idx];
-      const rest = [...prev.slice(0, idx), ...prev.slice(idx + 1)];
-      // Insert after any currently transferring items
-      const firstQueued = rest.findIndex(t => t.status === 'queued');
-      if (firstQueued === -1) {
-        return [...rest, item];
-      }
-      return [...rest.slice(0, firstQueued), item, ...rest.slice(firstQueued)];
-    });
-    setContextMenu(null);
-  }, []);
+    if (!isElectron()) {
+      setContextMenu(null);
+      return;
+    }
+
+    window.bridgefile.transfer
+      .moveToTop(id)
+      .then(() => fetchQueueState())
+      .finally(() => setContextMenu(null));
+  }, [fetchQueueState]);
 
   const handlePauseAll = useCallback(() => {
-    setAllPaused(true);
-    setTransfers(prev =>
-      prev.map(t =>
-        t.status === 'queued' || t.status === 'transferring'
-          ? { ...t, status: 'paused' as TransferStatus }
-          : t
-      )
-    );
-  }, []);
+    if (!isElectron()) {
+      setAllPaused(true);
+      return;
+    }
+
+    window.bridgefile.transfer
+      .setPaused(true)
+      .then(() => fetchQueueState());
+  }, [fetchQueueState]);
 
   const handleResumeAll = useCallback(() => {
-    setAllPaused(false);
-    setTransfers(prev =>
-      prev.map(t =>
-        t.status === 'paused'
-          ? { ...t, status: 'queued' as TransferStatus }
-          : t
-      )
-    );
-  }, []);
+    if (!isElectron()) {
+      setAllPaused(false);
+      return;
+    }
+
+    window.bridgefile.transfer
+      .setPaused(false)
+      .then(() => fetchQueueState());
+  }, [fetchQueueState]);
+
+  const handleMaxConcurrentChange = useCallback((nextValue: number) => {
+    if (!isElectron()) {
+      setMaxConcurrent(nextValue);
+      return;
+    }
+
+    window.bridgefile.transfer
+      .setMaxConcurrent(nextValue)
+      .then(() => fetchQueueState());
+  }, [fetchQueueState]);
+
+  const handleSpeedLimitChange = useCallback((nextLimit: SpeedLimit) => {
+    if (!isElectron()) {
+      setSpeedLimit(nextLimit);
+      return;
+    }
+
+    const normalizedLimit = nextLimit === 'unlimited' ? null : Number(nextLimit);
+    window.bridgefile.transfer
+      .setSpeedLimit(normalizedLimit)
+      .then(() => fetchQueueState());
+  }, [fetchQueueState]);
 
   const handleContextMenu = useCallback((e: React.MouseEvent, id: string) => {
     e.preventDefault();
@@ -224,10 +291,13 @@ export default function TransferQueue() {
   }, []);
 
   // Stats
-  const totalSize = transfers.reduce((a, t) => a + t.size, 0);
-  const totalTransferred = transfers.reduce((a, t) => a + t.transferred, 0);
+  const fileTransfers = transfers.filter(t => t.entryType === 'file');
+  const totalSize = fileTransfers.reduce((a, t) => a + t.size, 0);
+  const totalTransferred = fileTransfers.reduce((a, t) => a + t.transferred, 0);
   const activeCount = transfers.filter(t => t.status === 'transferring').length;
+  const pausedCount = transfers.filter(t => t.status === 'paused').length;
   const completedCount = transfers.filter(t => t.status === 'completed').length;
+  const cancelledCount = transfers.filter(t => t.status === 'cancelled').length;
   const queuedCount = transfers.filter(t => t.status === 'queued').length;
   const elapsedMs = Date.now() - startTime;
   const avgSpeed = useMemo(() => {
@@ -245,11 +315,17 @@ export default function TransferQueue() {
           {activeCount > 0 && (
             <span className="text-[#3b82f6]">{activeCount} active</span>
           )}
+          {allPaused && pausedCount > 0 && (
+            <span className="text-amber-400">{pausedCount} paused</span>
+          )}
           {queuedCount > 0 && (
             <span className="text-[#71717a]">{queuedCount} queued</span>
           )}
           {completedCount > 0 && (
             <span className="text-emerald-400">{completedCount} done</span>
+          )}
+          {cancelledCount > 0 && (
+            <span className="text-[#a1a1aa]">{cancelledCount} cancelled</span>
           )}
           <span>
             {formatSize(totalTransferred)} / {formatSize(totalSize)}
@@ -264,14 +340,14 @@ export default function TransferQueue() {
 
         <div className="flex items-center gap-2">
           {/* Speed indicator */}
-          <SpeedIndicator speedLimit={speedLimit} onSpeedLimitChange={setSpeedLimit} />
+          <SpeedIndicator speedLimit={speedLimit} onSpeedLimitChange={handleSpeedLimitChange} />
 
           {/* Max concurrent dropdown */}
           <div className="flex items-center gap-1 text-[11px] text-[#71717a]">
             <span>Max:</span>
             <select
               value={maxConcurrent}
-              onChange={(e) => setMaxConcurrent(Number(e.target.value))}
+              onChange={(e) => handleMaxConcurrentChange(Number(e.target.value))}
               className="bg-[#0a0a0f] border border-[#1e1e2e] rounded text-[10px] text-[#a1a1aa] px-1 py-0.5 focus:outline-none focus:border-[#3b82f6]"
             >
               {[1, 2, 3, 4, 5].map(n => (
@@ -285,21 +361,21 @@ export default function TransferQueue() {
             <button
               onClick={handleResumeAll}
               className="px-2 py-0.5 text-[10px] rounded bg-emerald-500/10 text-emerald-400 hover:bg-emerald-500/20 border border-emerald-500/20 transition-colors"
-              title="Resume all transfers"
+              title="Resume paused transfers"
             >
-              Resume all
+              Resume transfers
             </button>
           ) : (
             <button
               onClick={handlePauseAll}
               className="px-2 py-0.5 text-[10px] rounded bg-amber-500/10 text-amber-400 hover:bg-amber-500/20 border border-amber-500/20 transition-colors"
-              title="Pause all transfers"
+              title="Pause active and queued transfers"
             >
-              Pause all
+              Pause transfers
             </button>
           )}
 
-          {completedCount > 0 && (
+          {(completedCount > 0 || cancelledCount > 0) && (
             <button
               onClick={clearCompleted}
               className="text-[11px] text-[#71717a] hover:text-[#a1a1aa] transition-colors"
@@ -311,7 +387,7 @@ export default function TransferQueue() {
       </div>
 
       {/* Total progress bar */}
-      {activeCount > 0 && (
+      {(activeCount > 0 || pausedCount > 0) && (
         <div className="h-1 bg-[#1e1e2e]">
           <div
             className="h-full bg-[#3b82f6] transition-all duration-300"
@@ -357,6 +433,12 @@ export default function TransferQueue() {
                     </span>
                   </div>
 
+                  {t.entryType === 'directory' && t.currentFile && (
+                    <div className="mb-1 text-[10px] text-[#71717a] truncate">
+                      {t.currentFile}
+                    </div>
+                  )}
+
                   {/* Progress bar */}
                   {(t.status === 'transferring' || t.status === 'queued' || t.status === 'paused') && (
                     <div className="h-1 bg-[#1e1e2e] rounded-full overflow-hidden mb-1">
@@ -375,10 +457,8 @@ export default function TransferQueue() {
 
                   {/* Details row */}
                   <div className="flex items-center gap-2 text-[10px] text-[#71717a]">
-                    <span>
-                      {formatSize(t.transferred)} / {formatSize(t.size)}
-                    </span>
-                    {t.status === 'transferring' && (
+                    <span>{formatProgress(t)}</span>
+                    {t.entryType === 'file' && t.status === 'transferring' && (
                       <>
                         <span>{formatSpeed(t.speed)}</span>
                         <span>ETA {formatETA(remaining, t.speed)}</span>

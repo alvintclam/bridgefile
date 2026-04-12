@@ -2,7 +2,10 @@ import { Client, SFTPWrapper } from 'ssh2';
 import * as path from 'path';
 import * as fs from 'fs';
 import * as crypto from 'crypto';
+import * as os from 'os';
 import type { SFTPConfig, FileEntry } from '../../shared/types';
+import { bindAbort, createAbortError, throwIfAborted } from './transfer-abort';
+import { createRateLimitedTransform } from './transfer-rate-limit';
 
 // ── Connection pool ────────────────────────────────────────────
 
@@ -41,6 +44,35 @@ function getConn(connId: string): PooledConnection {
   return conn;
 }
 
+function expandHomePath(filePath: string): string {
+  if (filePath === '~') return os.homedir();
+  if (filePath.startsWith('~/')) return path.join(os.homedir(), filePath.slice(2));
+  return filePath;
+}
+
+function resolvePrivateKey(privateKey?: string): string | undefined {
+  if (!privateKey) return undefined;
+  if (/BEGIN [A-Z0-9 ]+PRIVATE KEY/.test(privateKey)) return privateKey;
+
+  const candidate = expandHomePath(privateKey);
+  try {
+    if (fs.existsSync(candidate) && fs.statSync(candidate).isFile()) {
+      return fs.readFileSync(candidate, 'utf-8');
+    }
+  } catch {
+    // Fall back to the original value and let ssh2 report a useful parse error.
+  }
+
+  return privateKey;
+}
+
+function normalizeConfig(config: SFTPConfig): SFTPConfig {
+  return {
+    ...config,
+    privateKey: resolvePrivateKey(config.privateKey),
+  };
+}
+
 /**
  * Create a fresh SSH + SFTP connection using the same config, replacing the
  * stale entry in the pool.  Returns the new PooledConnection.
@@ -51,6 +83,11 @@ async function reconnect(connId: string): Promise<PooledConnection> {
 
   // Tear down the old client (ignore errors — it may already be dead)
   try { old.client.end(); } catch { /* noop */ }
+
+  if (old.config.proxyHost) {
+    await connectViaProxy(connId, old.config);
+    return getConn(connId);
+  }
 
   return new Promise<PooledConnection>((resolve, reject) => {
     const client = new Client();
@@ -129,10 +166,11 @@ async function withReconnect<T>(
 
 export async function connect(config: SFTPConfig): Promise<string> {
   const id = crypto.randomUUID();
+  const normalizedConfig = normalizeConfig(config);
 
   // If proxy/jump host is configured, tunnel through it
-  if (config.proxyHost) {
-    return connectViaProxy(id, config);
+  if (normalizedConfig.proxyHost) {
+    return connectViaProxy(id, normalizedConfig);
   }
 
   return new Promise<string>((resolve, reject) => {
@@ -140,20 +178,20 @@ export async function connect(config: SFTPConfig): Promise<string> {
 
     const connectConfig: Record<string, unknown> = {
       host: config.host,
-      port: config.port ?? 22,
-      username: config.username,
-      readyTimeout: (config.timeout ?? 30) * 1000,
+      port: normalizedConfig.port ?? 22,
+      username: normalizedConfig.username,
+      readyTimeout: (normalizedConfig.timeout ?? 30) * 1000,
       keepaliveInterval: 10_000,
       algorithms: {
         compress: ['zlib@openssh.com', 'zlib', 'none'],
       },
     };
 
-    if (config.privateKey) {
-      connectConfig.privateKey = config.privateKey;
-      if (config.passphrase) connectConfig.passphrase = config.passphrase;
-    } else if (config.password) {
-      connectConfig.password = config.password;
+    if (normalizedConfig.privateKey) {
+      connectConfig.privateKey = normalizedConfig.privateKey;
+      if (normalizedConfig.passphrase) connectConfig.passphrase = normalizedConfig.passphrase;
+    } else if (normalizedConfig.password) {
+      connectConfig.password = normalizedConfig.password;
     }
 
     client.on('ready', () => {
@@ -167,7 +205,7 @@ export async function connect(config: SFTPConfig): Promise<string> {
           id,
           client,
           sftp,
-          config,
+          config: normalizedConfig,
           lastActivity: Date.now(),
         });
 
@@ -329,30 +367,43 @@ export async function upload(
   localPath: string,
   remotePath: string,
   onProgress?: (transferred: number, total: number) => void,
+  signal?: AbortSignal,
 ): Promise<void> {
   return withReconnect(connId, ({ sftp }) => {
+    throwIfAborted(signal);
     const fileStat = fs.statSync(localPath);
     const total = fileStat.size;
 
     return new Promise((resolve, reject) => {
-      const readStream = fs.createReadStream(localPath);
-      const writeStream = sftp.createWriteStream(remotePath);
       let transferred = 0;
-
-      readStream.on('data', (chunk: Buffer) => {
-        transferred += chunk.length;
+      const readStream = fs.createReadStream(localPath);
+      const throttle = createRateLimitedTransform((chunkBytes) => {
+        transferred += chunkBytes;
         onProgress?.(transferred, total);
       });
+      const writeStream = sftp.createWriteStream(remotePath);
+      const cleanupAbort = bindAbort(signal, () => {
+        const abortError = createAbortError();
+        readStream.destroy(abortError);
+        throttle.destroy(abortError);
+        writeStream.destroy();
+      });
 
-      writeStream.on('close', () => resolve());
+      writeStream.on('close', () => {
+        cleanupAbort();
+        resolve();
+      });
       writeStream.on('error', (err: Error) =>
         reject(new Error(`Upload failed: ${err.message}`)),
       );
       readStream.on('error', (err: Error) =>
-        reject(new Error(`Read failed: ${err.message}`)),
+        throttle.destroy(new Error(`Read failed: ${err.message}`)),
+      );
+      throttle.on('error', (err: Error) =>
+        reject(new Error(`Upload throttling failed: ${err.message}`)),
       );
 
-      readStream.pipe(writeStream);
+      readStream.pipe(throttle).pipe(writeStream);
     });
   });
 }
@@ -362,7 +413,9 @@ export async function download(
   remotePath: string,
   localPath: string,
   onProgress?: (transferred: number, total: number) => void,
+  signal?: AbortSignal,
 ): Promise<void> {
+  throwIfAborted(signal);
   // Get remote file size first (also benefits from reconnect)
   const remoteStat = await stat(connId, remotePath);
   const total = remoteStat.size;
@@ -373,24 +426,35 @@ export async function download(
 
   return withReconnect(connId, ({ sftp }) => {
     return new Promise((resolve, reject) => {
-      const readStream = sftp.createReadStream(remotePath);
-      const writeStream = fs.createWriteStream(localPath);
       let transferred = 0;
-
-      readStream.on('data', (chunk: Buffer) => {
-        transferred += chunk.length;
+      const readStream = sftp.createReadStream(remotePath);
+      const throttle = createRateLimitedTransform((chunkBytes) => {
+        transferred += chunkBytes;
         onProgress?.(transferred, total);
       });
+      const writeStream = fs.createWriteStream(localPath);
+      const cleanupAbort = bindAbort(signal, () => {
+        const abortError = createAbortError();
+        readStream.destroy(abortError);
+        throttle.destroy(abortError);
+        writeStream.destroy();
+      });
 
-      writeStream.on('close', () => resolve());
+      writeStream.on('close', () => {
+        cleanupAbort();
+        resolve();
+      });
       writeStream.on('error', (err: Error) =>
         reject(new Error(`Write failed: ${err.message}`)),
       );
       readStream.on('error', (err: Error) =>
-        reject(new Error(`Download failed: ${err.message}`)),
+        throttle.destroy(new Error(`Download failed: ${err.message}`)),
+      );
+      throttle.on('error', (err: Error) =>
+        reject(new Error(`Download throttling failed: ${err.message}`)),
       );
 
-      readStream.pipe(writeStream);
+      readStream.pipe(throttle).pipe(writeStream);
     });
   });
 }
@@ -470,7 +534,9 @@ export async function uploadDir(
   localDir: string,
   remoteDir: string,
   onProgress?: (file: string, fileIndex: number, totalFiles: number) => void,
+  signal?: AbortSignal,
 ): Promise<void> {
+  throwIfAborted(signal);
   const { sftp } = getConn(connId);
 
   // Ensure remote directory exists
@@ -501,6 +567,7 @@ export async function uploadDir(
 
   // Create all remote directories first
   const createDirs = async (localBase: string, remoteBase: string) => {
+    throwIfAborted(signal);
     const items = fs.readdirSync(localBase, { withFileTypes: true });
     for (const item of items) {
       if (item.isDirectory()) {
@@ -519,9 +586,10 @@ export async function uploadDir(
 
   // Upload all files
   for (let i = 0; i < allFiles.length; i++) {
+    throwIfAborted(signal);
     const f = allFiles[i];
     onProgress?.(f.local, i + 1, allFiles.length);
-    await upload(connId, f.local, f.remote);
+    await upload(connId, f.local, f.remote, undefined, signal);
   }
 }
 
@@ -530,7 +598,9 @@ export async function downloadDir(
   remoteDir: string,
   localDir: string,
   onProgress?: (file: string, fileIndex: number, totalFiles: number) => void,
+  signal?: AbortSignal,
 ): Promise<void> {
+  throwIfAborted(signal);
   // Ensure local directory exists
   fs.mkdirSync(localDir, { recursive: true });
 
@@ -539,6 +609,7 @@ export async function downloadDir(
 
   // Gather all files recursively
   const gather = async (remotePath: string, localPath: string) => {
+    throwIfAborted(signal);
     const items = await list(connId, remotePath);
     for (const item of items) {
       const rPath = path.posix.join(remotePath, item.name);
@@ -555,9 +626,10 @@ export async function downloadDir(
 
   // Download all files
   for (let i = 0; i < allFiles.length; i++) {
+    throwIfAborted(signal);
     const f = allFiles[i];
     onProgress?.(f.remote, i + 1, allFiles.length);
-    await download(connId, f.remote, f.local);
+    await download(connId, f.remote, f.local, undefined, signal);
   }
 }
 
@@ -610,11 +682,12 @@ export async function resumeTransfer(
   localPath: string,
   remotePath: string,
   onProgress?: (transferred: number, total: number) => void,
+  signal?: AbortSignal,
 ): Promise<void> {
   if (direction === 'upload') {
-    return resumeUpload(connId, localPath, remotePath, onProgress);
+    return resumeUpload(connId, localPath, remotePath, onProgress, signal);
   } else {
-    return resumeDownload(connId, remotePath, localPath, onProgress);
+    return resumeDownload(connId, remotePath, localPath, onProgress, signal);
   }
 }
 
@@ -623,7 +696,9 @@ async function resumeUpload(
   localPath: string,
   remotePath: string,
   onProgress?: (transferred: number, total: number) => void,
+  signal?: AbortSignal,
 ): Promise<void> {
+  throwIfAborted(signal);
   const fileStat = fs.statSync(localPath);
   const total = fileStat.size;
 
@@ -644,26 +719,37 @@ async function resumeUpload(
 
   return withReconnect(connId, ({ sftp }) => {
     return new Promise((resolve, reject) => {
+      let transferred = remoteSize;
       const readStream = fs.createReadStream(localPath, { start: remoteSize });
+      const throttle = createRateLimitedTransform((chunkBytes) => {
+        transferred += chunkBytes;
+        onProgress?.(transferred, total);
+      });
       const writeStream = sftp.createWriteStream(remotePath, {
         flags: remoteSize > 0 ? 'a' : 'w',
       });
-      let transferred = remoteSize;
-
-      readStream.on('data', (chunk: Buffer) => {
-        transferred += chunk.length;
-        onProgress?.(transferred, total);
+      const cleanupAbort = bindAbort(signal, () => {
+        const abortError = createAbortError();
+        readStream.destroy(abortError);
+        throttle.destroy(abortError);
+        writeStream.destroy();
       });
 
-      writeStream.on('close', () => resolve());
+      writeStream.on('close', () => {
+        cleanupAbort();
+        resolve();
+      });
       writeStream.on('error', (err: Error) =>
         reject(new Error(`Resume upload failed: ${err.message}`)),
       );
       readStream.on('error', (err: Error) =>
-        reject(new Error(`Read failed: ${err.message}`)),
+        throttle.destroy(new Error(`Read failed: ${err.message}`)),
+      );
+      throttle.on('error', (err: Error) =>
+        reject(new Error(`Resume upload throttling failed: ${err.message}`)),
       );
 
-      readStream.pipe(writeStream);
+      readStream.pipe(throttle).pipe(writeStream);
     });
   });
 }
@@ -673,7 +759,9 @@ async function resumeDownload(
   remotePath: string,
   localPath: string,
   onProgress?: (transferred: number, total: number) => void,
+  signal?: AbortSignal,
 ): Promise<void> {
+  throwIfAborted(signal);
   const remoteStat = await stat(connId, remotePath);
   const total = remoteStat.size;
 
@@ -698,26 +786,37 @@ async function resumeDownload(
 
   return withReconnect(connId, ({ sftp }) => {
     return new Promise((resolve, reject) => {
+      let transferred = localSize;
       const readStream = sftp.createReadStream(remotePath, { start: localSize });
+      const throttle = createRateLimitedTransform((chunkBytes) => {
+        transferred += chunkBytes;
+        onProgress?.(transferred, total);
+      });
       const writeStream = fs.createWriteStream(localPath, {
         flags: localSize > 0 ? 'a' : 'w',
       });
-      let transferred = localSize;
-
-      readStream.on('data', (chunk: Buffer) => {
-        transferred += chunk.length;
-        onProgress?.(transferred, total);
+      const cleanupAbort = bindAbort(signal, () => {
+        const abortError = createAbortError();
+        readStream.destroy(abortError);
+        throttle.destroy(abortError);
+        writeStream.destroy(abortError);
       });
 
-      writeStream.on('close', () => resolve());
+      writeStream.on('close', () => {
+        cleanupAbort();
+        resolve();
+      });
       writeStream.on('error', (err: Error) =>
         reject(new Error(`Write failed: ${err.message}`)),
       );
       readStream.on('error', (err: Error) =>
-        reject(new Error(`Resume download failed: ${err.message}`)),
+        throttle.destroy(new Error(`Resume download failed: ${err.message}`)),
+      );
+      throttle.on('error', (err: Error) =>
+        reject(new Error(`Resume download throttling failed: ${err.message}`)),
       );
 
-      readStream.pipe(writeStream);
+      readStream.pipe(throttle).pipe(writeStream);
     });
   });
 }

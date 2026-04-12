@@ -50,7 +50,7 @@ export default function SpeedIndicator({ speedLimit, onSpeedLimitChange }: Speed
           let totalDownload = 0;
 
           for (const t of queue) {
-            if (t.status === 'in-progress') {
+            if (t.status === 'in-progress' && t.entryType !== 'directory') {
               if (t.direction === 'upload') {
                 totalUpload += t.transferred;
               } else {

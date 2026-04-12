@@ -58,6 +58,7 @@ const api = {
       ipcRenderer.invoke('ftp:rename', connId, oldPath, newPath),
     delete: (connId: string, path: string) =>
       ipcRenderer.invoke('ftp:delete', connId, path),
+    stat: (connId: string, path: string) => ipcRenderer.invoke('ftp:stat', connId, path),
     uploadDir: (connId: string, localDir: string, remoteDir: string) =>
       ipcRenderer.invoke('ftp:uploadDir', connId, localDir, remoteDir),
     downloadDir: (connId: string, remoteDir: string, localDir: string) =>
@@ -87,6 +88,7 @@ const api = {
     rename: (connId: string, oldKey: string, newKey: string) =>
       ipcRenderer.invoke('s3:rename', connId, oldKey, newKey),
     delete: (connId: string, key: string) => ipcRenderer.invoke('s3:delete', connId, key),
+    stat: (connId: string, path: string) => ipcRenderer.invoke('s3:stat', connId, path),
     uploadDir: (connId: string, localDir: string, remoteDir: string) =>
       ipcRenderer.invoke('s3:uploadDir', connId, localDir, remoteDir),
     downloadDir: (connId: string, remoteDir: string, localDir: string) =>
@@ -100,10 +102,20 @@ const api = {
   // ── Transfer queue ─────────────────────────────────────────
   transfer: {
     getQueue: () => ipcRenderer.invoke('transfer:getQueue'),
+    getState: () => ipcRenderer.invoke('transfer:getState'),
     cancelTransfer: (transferId: string) =>
       ipcRenderer.invoke('transfer:cancel', transferId),
     retryTransfer: (transferId: string) =>
       ipcRenderer.invoke('transfer:retry', transferId),
+    setMaxConcurrent: (maxConcurrent: number) =>
+      ipcRenderer.invoke('transfer:setMaxConcurrent', maxConcurrent),
+    setPaused: (paused: boolean) =>
+      ipcRenderer.invoke('transfer:setPaused', paused),
+    setSpeedLimit: (speedLimitMbps: number | null) =>
+      ipcRenderer.invoke('transfer:setSpeedLimit', speedLimitMbps),
+    moveToTop: (transferId: string) =>
+      ipcRenderer.invoke('transfer:moveToTop', transferId),
+    clearFinished: () => ipcRenderer.invoke('transfer:clearFinished'),
   },
 
   // ── Local filesystem ───────────────────────────────────────
@@ -111,6 +123,13 @@ const api = {
     listLocal: (dirPath: string) => ipcRenderer.invoke('fs:listLocal', dirPath),
     getHomeDir: () => ipcRenderer.invoke('fs:getHomeDir'),
     mkdir: (dirPath: string) => ipcRenderer.invoke('fs:mkdir', dirPath),
+    rename: (oldPath: string, newPath: string) =>
+      ipcRenderer.invoke('fs:rename', oldPath, newPath),
+    delete: (targetPath: string) => ipcRenderer.invoke('fs:delete', targetPath),
+    readTextFile: (filePath: string) => ipcRenderer.invoke('fs:readTextFile', filePath),
+    writeTextFile: (filePath: string, content: string) =>
+      ipcRenderer.invoke('fs:writeTextFile', filePath, content),
+    stat: (targetPath: string) => ipcRenderer.invoke('fs:stat', targetPath),
   },
 
   // ── Bookmarks ──────────────────────────────────────────────
@@ -128,6 +147,12 @@ const api = {
       ipcRenderer.invoke('app:editRemoteFile', protocol, connId, remotePath),
     saveRemoteFile: (protocol: string, connId: string, remotePath: string, content: string) =>
       ipcRenderer.invoke('app:saveRemoteFile', protocol, connId, remotePath, content),
+    computeRemoteChecksum: (
+      protocol: 'sftp' | 's3' | 'ftp',
+      connId: string,
+      remotePath: string,
+      algorithm: string,
+    ) => ipcRenderer.invoke('app:computeRemoteChecksum', protocol, connId, remotePath, algorithm),
     exportLogs: (content: string) => ipcRenderer.invoke('app:exportLogs', content),
     checkForUpdates: () => ipcRenderer.invoke('app:checkForUpdates'),
     computeChecksum: (filePath: string, algorithm: string) =>

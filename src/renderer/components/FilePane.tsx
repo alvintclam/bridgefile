@@ -4,6 +4,18 @@ import type { FileOperationsParams } from '../hooks/useFileOperations';
 import { t } from '../lib/i18n';
 import { isTextFile } from './FileEditor';
 
+export interface ExternalDropItem {
+  path: string;
+  name: string;
+  isDirectory?: boolean;
+}
+
+function isExternalDropItem(
+  item: ExternalDropItem | null,
+): item is ExternalDropItem {
+  return item !== null;
+}
+
 interface FilePaneProps {
   side: 'local' | 'remote';
   label: string;
@@ -11,8 +23,15 @@ interface FilePaneProps {
   connectionId?: string;
   /** Called when the user navigates to a new path (for synchronized browsing) */
   onNavigate?: (path: string) => void;
-  /** When set, the pane should attempt to navigate to this path (from sync) */
+  /** When set, the pane should attempt to navigate to this path. */
   syncPath?: string;
+  refreshToken?: number;
+  onTransfer?: (
+    direction: 'upload' | 'download',
+    files: { name: string; isDirectory: boolean }[],
+    sourcePath: string,
+  ) => Promise<void>;
+  onDesktopDrop?: (items: ExternalDropItem[], targetPath: string) => Promise<void>;
   /** Dialog callbacks */
   onCompare?: () => void;
   onSearch?: () => void;
@@ -49,8 +68,27 @@ interface MultiFileProgress {
 // ── Drag & Drop data key ───────────────────────────────────────
 
 const DRAG_DATA_KEY = 'application/x-bridgefile-transfer';
+type FileWithPath = File & { path?: string };
+type DataTransferItemWithEntry = DataTransferItem & {
+  webkitGetAsEntry?: () => { isDirectory: boolean } | null;
+};
 
-export default function FilePane({ side, label, protocol, connectionId, onNavigate, syncPath, onCompare, onSearch, onEditFile, onChecksum, onPermissions }: FilePaneProps) {
+export default function FilePane({
+  side,
+  label: _label,
+  protocol,
+  connectionId,
+  onNavigate,
+  syncPath,
+  refreshToken = 0,
+  onTransfer,
+  onDesktopDrop,
+  onCompare,
+  onSearch,
+  onEditFile,
+  onChecksum,
+  onPermissions,
+}: FilePaneProps) {
   const params: FileOperationsParams = { side, protocol, connectionId };
   const ops = useFileOperations(params);
   const {
@@ -113,6 +151,19 @@ export default function FilePane({ side, label, protocol, connectionId, onNaviga
   useEffect(() => {
     setPathInput(currentPath);
   }, [currentPath]);
+
+  useEffect(() => {
+    if (syncPath && syncPath !== currentPath) {
+      rawNavigate(syncPath);
+      setSelected(new Set());
+    }
+  }, [syncPath, currentPath, rawNavigate]);
+
+  useEffect(() => {
+    if (refreshToken > 0) {
+      refresh();
+    }
+  }, [refreshToken, refresh]);
 
   useEffect(() => {
     if (editingPath && pathInputRef.current) {
@@ -290,6 +341,29 @@ export default function FilePane({ side, label, protocol, connectionId, onNaviga
     });
   }, [overwriteDialog.resolve]);
 
+  const getActionFiles = useCallback((preferredFile?: FileEntry): FileEntry[] => {
+    if (preferredFile && selected.has(preferredFile.name)) {
+      return sortedFiles.filter(file => selected.has(file.name));
+    }
+    if (preferredFile) {
+      return [preferredFile];
+    }
+    return sortedFiles.filter(file => selected.has(file.name));
+  }, [selected, sortedFiles]);
+
+  const requestTransfer = useCallback(async (fileEntries: FileEntry[]) => {
+    if (!onTransfer || fileEntries.length === 0) return;
+
+    await onTransfer(
+      side === 'local' ? 'upload' : 'download',
+      fileEntries.map(file => ({
+        name: file.name,
+        isDirectory: file.isDirectory,
+      })),
+      currentPath,
+    );
+  }, [onTransfer, side, currentPath]);
+
   // ── Drag from desktop / Finder ───────────────────────────────
 
   const handleDragOver = useCallback((e: React.DragEvent) => {
@@ -297,11 +371,13 @@ export default function FilePane({ side, label, protocol, connectionId, onNaviga
     e.stopPropagation();
 
     // Check if this is an external file drop or a pane-to-pane transfer
-    if (e.dataTransfer.types.includes('Files') || e.dataTransfer.types.includes(DRAG_DATA_KEY)) {
+    const hasExternalFiles = e.dataTransfer.types.includes('Files');
+    const hasPaneTransfer = e.dataTransfer.types.includes(DRAG_DATA_KEY);
+    if ((hasExternalFiles && onDesktopDrop) || (hasPaneTransfer && onTransfer)) {
       e.dataTransfer.dropEffect = 'copy';
       setIsDragOver(true);
     }
-  }, []);
+  }, [onDesktopDrop, onTransfer]);
 
   const handleDragLeave = useCallback((e: React.DragEvent) => {
     e.preventDefault();
@@ -321,7 +397,7 @@ export default function FilePane({ side, label, protocol, connectionId, onNaviga
     }
   }, []);
 
-  const handleDrop = useCallback((e: React.DragEvent) => {
+  const handleDrop = useCallback(async (e: React.DragEvent) => {
     e.preventDefault();
     e.stopPropagation();
     setIsDragOver(false);
@@ -336,11 +412,9 @@ export default function FilePane({ side, label, protocol, connectionId, onNaviga
           files: { name: string; isDirectory: boolean }[];
         };
 
-        // Only accept drops from the opposite pane
         if (data.sourceSide !== side) {
-          // In a real implementation, this would trigger upload/download
-          // via the parent component. For now, log the intent.
-          console.log(`[transfer] ${data.sourceSide} -> ${side}`, data.files.map(f => f.name));
+          const direction = data.sourceSide === 'local' ? 'upload' : 'download';
+          await onTransfer?.(direction, data.files, data.sourcePath);
         }
       } catch {
         // Invalid transfer data
@@ -349,44 +423,40 @@ export default function FilePane({ side, label, protocol, connectionId, onNaviga
     }
 
     // Handle external file drops (from desktop/Finder)
-    const droppedFiles = e.dataTransfer.files;
+    const droppedFiles = Array.from(e.dataTransfer.files) as FileWithPath[];
     if (droppedFiles.length > 0) {
-      const fileNames: string[] = [];
-      for (let i = 0; i < droppedFiles.length; i++) {
-        const file = droppedFiles[i];
-        fileNames.push(file.name);
-      }
+      const droppedItems = droppedFiles
+        .map((file, index) => {
+          const dataTransferItem = e.dataTransfer.items[index] as DataTransferItemWithEntry | undefined;
+          const entry = dataTransferItem?.webkitGetAsEntry?.() ?? null;
+          if (!file.path) {
+            return null;
+          }
+          return {
+            path: file.path,
+            name: file.name || file.path.split(/[\\/]/).pop() || file.path,
+            isDirectory: entry?.isDirectory,
+          } as ExternalDropItem;
+        })
+        .filter(isExternalDropItem);
 
-      // Show multi-file progress
-      if (fileNames.length > 1) {
+      if (droppedItems.length > 0 && onDesktopDrop) {
+        const fileNames = droppedItems.map((item) => item.name);
         setMultiProgress({
           visible: true,
           direction: 'upload',
           current: 0,
           total: fileNames.length,
-          currentFile: fileNames[0],
+          currentFile: fileNames[0] ?? '',
         });
-
-        // Simulate progress for mock mode
-        let idx = 0;
-        const interval = setInterval(() => {
-          idx++;
-          if (idx >= fileNames.length) {
-            clearInterval(interval);
-            setMultiProgress(prev => ({ ...prev, visible: false }));
-            return;
-          }
-          setMultiProgress(prev => ({
-            ...prev,
-            current: idx,
-            currentFile: fileNames[idx],
-          }));
-        }, 500);
+        try {
+          await onDesktopDrop(droppedItems, currentPath);
+        } finally {
+          setMultiProgress(prev => ({ ...prev, visible: false }));
+        }
       }
-
-      console.log(`[drop] ${fileNames.length} file(s) dropped onto ${side} pane at ${currentPath}`, fileNames);
     }
-  }, [side, currentPath]);
+  }, [side, currentPath, onTransfer, onDesktopDrop]);
 
   // ── Drag between panes (row draggable) ───────────────────────
 
@@ -494,8 +564,7 @@ export default function FilePane({ side, label, protocol, connectionId, onNaviga
           if (selectedFile.isDirectory) {
             handleDoubleClick(selectedFile);
           } else {
-            // For files, trigger download (in context of this pane)
-            console.log(`[enter] Download/open: ${selectedFile.name}`);
+            requestTransfer([selectedFile]).catch(() => {});
           }
         }
         return;
@@ -537,7 +606,7 @@ export default function FilePane({ side, label, protocol, connectionId, onNaviga
 
     container.addEventListener('keydown', handleKeyDown);
     return () => container.removeEventListener('keydown', handleKeyDown);
-  }, [selected, sortedFiles, currentPath, deleteFiles, refresh, handleGoUp]);
+  }, [selected, sortedFiles, deleteFiles, refresh, handleGoUp, requestTransfer]);
 
   const breadcrumbs = currentPath === '/'
     ? ['/']
@@ -707,7 +776,7 @@ export default function FilePane({ side, label, protocol, connectionId, onNaviga
                 <polyline points="17,8 12,3 7,8" stroke="currentColor" strokeWidth="1.5" strokeLinecap="round" strokeLinejoin="round" />
                 <line x1="12" y1="3" x2="12" y2="15" stroke="currentColor" strokeWidth="1.5" strokeLinecap="round" />
               </svg>
-              <span className="text-xs text-[#3b82f6] font-medium">Drop files here to upload</span>
+              <span className="text-xs text-[#3b82f6] font-medium">Drop items here to transfer</span>
             </div>
           </div>
         )}
@@ -888,7 +957,8 @@ export default function FilePane({ side, label, protocol, connectionId, onNaviga
             onClose={() => setContextMenu(null)}
             onOpen={(file) => handleDoubleClick(file)}
             onDownload={() => {
-              // mock
+              const toTransfer = getActionFiles(contextMenu.file);
+              requestTransfer(toTransfer).catch(() => {});
               setContextMenu(null);
             }}
             onRename={(file) => {

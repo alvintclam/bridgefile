@@ -7,7 +7,8 @@ interface FileEditorProps {
   onClose: () => void;
   protocol?: 'sftp' | 's3' | 'ftp';
   connectionId?: string;
-  remotePath: string;
+  localPath?: string;
+  remotePath?: string;
   fileName: string;
   fileSize: number;
 }
@@ -62,6 +63,7 @@ export default function FileEditor({
   onClose,
   protocol,
   connectionId,
+  localPath,
   remotePath,
   fileName,
   fileSize,
@@ -74,10 +76,12 @@ export default function FileEditor({
   const [saved, setSaved] = useState(false);
 
   const hasChanges = content !== originalContent;
+  const activePath = localPath ?? remotePath ?? '';
+  const isLocalFile = Boolean(localPath);
 
   // Load file content
   useEffect(() => {
-    if (!isOpen || !protocol || !connectionId) return;
+    if (!isOpen || (!localPath && (!protocol || !connectionId || !remotePath))) return;
 
     setLoading(true);
     setError(null);
@@ -86,17 +90,12 @@ export default function FileEditor({
     (async () => {
       try {
         if (isElectron()) {
-          const tempPath = await window.bridgefile.app.editRemoteFile(protocol, connectionId, remotePath);
-          // Read the downloaded temp file -- we need to read it via fetch or a new IPC
-          // Since we have the temp path, we'll use the fs:readFile approach
-          // For simplicity, download again and read content via the API
-          // Actually, editRemoteFile returns a temp path. We need another IPC to read it.
-          // Let's use the fs:listLocal approach -- but actually we need file content.
-          // The simplest approach: re-download content via the protocol APIs directly
-          // and have the main process return the content. But our current API downloads to
-          // a file. Let's use fetch on the temp path. In Electron, we can use file:// URLs.
-          const response = await fetch(`file://${tempPath}`);
-          const text = await response.text();
+          const text = localPath
+            ? await window.bridgefile.fs.readTextFile(localPath)
+            : await (async () => {
+                const tempPath = await window.bridgefile.app.editRemoteFile(protocol!, connectionId!, remotePath!);
+                return window.bridgefile.fs.readTextFile(tempPath);
+              })();
           setContent(text);
           setOriginalContent(text);
         }
@@ -107,17 +106,22 @@ export default function FileEditor({
         setLoading(false);
       }
     })();
-  }, [isOpen, protocol, connectionId, remotePath]);
+  }, [isOpen, protocol, connectionId, localPath, remotePath]);
 
   const handleSave = useCallback(async () => {
-    if (!protocol || !connectionId || !isElectron()) return;
+    if (!isElectron()) return;
+    if (!localPath && (!protocol || !connectionId || !remotePath)) return;
 
     setSaving(true);
     setError(null);
     setSaved(false);
 
     try {
-      await window.bridgefile.app.saveRemoteFile(protocol, connectionId, remotePath, content);
+      if (localPath) {
+        await window.bridgefile.fs.writeTextFile(localPath, content);
+      } else {
+        await window.bridgefile.app.saveRemoteFile(protocol!, connectionId!, remotePath!, content);
+      }
       setOriginalContent(content);
       setSaved(true);
       setTimeout(() => setSaved(false), 2000);
@@ -127,7 +131,7 @@ export default function FileEditor({
     } finally {
       setSaving(false);
     }
-  }, [protocol, connectionId, remotePath, content]);
+  }, [protocol, connectionId, localPath, remotePath, content]);
 
   const handleKeyDown = useCallback(
     (e: React.KeyboardEvent) => {
@@ -163,7 +167,8 @@ export default function FileEditor({
                 )}
               </h2>
               <p className="text-[10px] text-[#71717a] font-mono mt-0.5">
-                {remotePath} &middot; {formatSize(fileSize)} &middot; UTF-8
+                {activePath} &middot; {formatSize(fileSize)} &middot; UTF-8
+                {isLocalFile ? ' · Local' : ' · Remote'}
               </p>
             </div>
           </div>

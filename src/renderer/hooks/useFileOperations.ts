@@ -20,8 +20,6 @@ export interface FileOperations {
   loading: boolean;
   error: string | null;
   navigate: (path: string) => void;
-  upload: (files: FileEntry[]) => void;
-  download: (files: FileEntry[]) => void;
   mkdir: (name: string) => void;
   rename: (oldName: string, newName: string) => void;
   deleteFiles: (files: FileEntry[]) => void;
@@ -125,7 +123,10 @@ export function useFileOperations(params: FileOperationsParams): FileOperations 
   useEffect(() => {
     if (!isElectron()) return;
     if (side === 'local') {
-      loadFiles('/');
+      window.bridgefile.fs
+        .getHomeDir()
+        .then((homeDir: string) => loadFiles(homeDir))
+        .catch(() => loadFiles('/'));
     } else if (connectionId && connectionId !== prevConnId.current) {
       // New connection -- load root
       loadFiles('/');
@@ -143,59 +144,6 @@ export function useFileOperations(params: FileOperationsParams): FileOperations 
   const navigate = useCallback((path: string) => {
     loadFiles(path);
   }, [loadFiles]);
-
-  // ── upload ──────────────────────────────────────────────────
-
-  const upload = useCallback((fileEntries: FileEntry[]) => {
-    if (!isElectron()) {
-      setError('Not in Electron environment');
-      return;
-    }
-
-    const { connectionId: cid, protocol: proto } = connRef.current;
-    if (!cid || !proto) return;
-
-    const api = getProtocolApi(proto);
-
-    (async () => {
-      try {
-        for (const f of fileEntries) {
-          const localPath = joinPath(currentPath, f.name);
-          // For upload, local file at currentPath (local pane) -> remote currentPath
-          await api.upload(cid, localPath, joinPath(currentPath, f.name));
-        }
-      } catch (err: unknown) {
-        const msg = err instanceof Error ? err.message : String(err);
-        setError(msg);
-      }
-    })();
-  }, [currentPath]);
-
-  // ── download ────────────────────────────────────────────────
-
-  const download = useCallback((fileEntries: FileEntry[]) => {
-    if (!isElectron()) {
-      setError('Not in Electron environment');
-      return;
-    }
-
-    const { connectionId: cid, protocol: proto } = connRef.current;
-    if (!cid || !proto) return;
-
-    const api = getProtocolApi(proto);
-
-    (async () => {
-      try {
-        for (const f of fileEntries) {
-          const remotePath = joinPath(currentPath, f.name);
-          await api.download(cid, remotePath, joinPath(currentPath, f.name));
-        }
-      } catch (err: unknown) {
-        const msg = err instanceof Error ? err.message : String(err);
-        setError(msg);
-      }
-    })();
-  }, [currentPath]);
 
   // ── mkdir ───────────────────────────────────────────────────
 
@@ -239,10 +187,10 @@ export function useFileOperations(params: FileOperationsParams): FileOperations 
     (async () => {
       try {
         if (side === 'local') {
-          // No local rename in API
-          setFiles(prev =>
-            prev.map(f => (f.name === oldName ? { ...f, name: newName } : f))
-          );
+          const oldPath = joinPath(currentPath, oldName);
+          const newPath = joinPath(currentPath, newName);
+          await window.bridgefile.fs.rename(oldPath, newPath);
+          loadFiles(currentPath);
           return;
         }
 
@@ -268,12 +216,31 @@ export function useFileOperations(params: FileOperationsParams): FileOperations 
       return;
     }
 
+    if (toDelete.length === 0) {
+      return;
+    }
+
+    const selectionLabel =
+      toDelete.length === 1
+        ? `${toDelete[0].isDirectory ? 'folder' : 'file'} "${toDelete[0].name}"`
+        : `${toDelete.length} selected items`;
+    const locationLabel = side === 'local' ? 'local disk' : 'remote server';
+    const confirmed =
+      typeof window === 'undefined' || typeof window.confirm !== 'function'
+        ? true
+        : window.confirm(`Delete ${selectionLabel} from the ${locationLabel}?\n\nThis cannot be undone.`);
+
+    if (!confirmed) {
+      return;
+    }
+
     (async () => {
       try {
         if (side === 'local') {
-          // No local delete in API
-          const names = new Set(toDelete.map(f => f.name));
-          setFiles(prev => prev.filter(f => !names.has(f.name)));
+          for (const file of toDelete) {
+            await window.bridgefile.fs.delete(joinPath(currentPath, file.name));
+          }
+          loadFiles(currentPath);
           return;
         }
 
@@ -281,7 +248,12 @@ export function useFileOperations(params: FileOperationsParams): FileOperations 
         if (!cid || !proto) return;
         const api = getProtocolApi(proto);
         for (const f of toDelete) {
-          await api.delete(cid, joinPath(currentPath, f.name));
+          const targetPath = joinPath(currentPath, f.name);
+          if (f.isDirectory) {
+            await api.deleteDir(cid, targetPath);
+          } else {
+            await api.delete(cid, targetPath);
+          }
         }
         loadFiles(currentPath);
       } catch (err: unknown) {
@@ -303,8 +275,6 @@ export function useFileOperations(params: FileOperationsParams): FileOperations 
     loading,
     error,
     navigate,
-    upload,
-    download,
     mkdir: mkdirOp,
     rename: renameOp,
     deleteFiles: deleteFilesOp,

@@ -3,6 +3,8 @@ import * as path from 'path';
 import * as fs from 'fs';
 import * as crypto from 'crypto';
 import type { FTPConfig, FileEntry } from '../../shared/types';
+import { bindAbort, createAbortError, throwIfAborted } from './transfer-abort';
+import { createRateLimitedTransform } from './transfer-rate-limit';
 
 // ── Connection pool ────────────────────────────────────────────
 
@@ -10,6 +12,7 @@ interface PooledFTP {
   id: string;
   client: FTPClient;
   config: FTPConfig;
+  rootDir: string;
   lastActivity: number;
 }
 
@@ -46,6 +49,7 @@ export async function connect(config: FTPConfig): Promise<string> {
   const id = crypto.randomUUID();
   const client = new FTPClient((config.timeout ?? 30) * 1000);
   client.ftp.verbose = false;
+  let rootDir = '/';
 
   try {
     await client.access({
@@ -57,6 +61,7 @@ export async function connect(config: FTPConfig): Promise<string> {
       secureOptions: config.secureOptions,
     });
     await client.useDefaultSettings();
+    rootDir = normalizeAbsolutePath(await client.pwd());
   } catch (err: any) {
     client.close();
 
@@ -85,6 +90,7 @@ export async function connect(config: FTPConfig): Promise<string> {
     id,
     client,
     config,
+    rootDir,
     lastActivity: Date.now(),
   });
 
@@ -100,22 +106,9 @@ export async function disconnect(connId: string): Promise<void> {
 }
 
 export async function list(connId: string, dirPath: string): Promise<FileEntry[]> {
-  const { client } = getConn(connId);
-
-  let entries: FileInfo[] = await client.list(dirPath);
-
-  // Some FTP servers return empty at "/" because the user lands in a
-  // different working directory.  Fall back to the server-reported cwd.
-  if (entries.length === 0 && dirPath === '/') {
-    try {
-      const cwd = await client.pwd();
-      if (cwd && cwd !== '/') {
-        entries = await client.list(cwd);
-      }
-    } catch {
-      // Ignore — best-effort fallback
-    }
-  }
+  const conn = getConn(connId);
+  const normalizedDirPath = normalizeAbsolutePath(dirPath);
+  const entries = await listDirectory(conn, normalizedDirPath);
 
   const result: FileEntry[] = entries
     .filter((entry) => entry.name !== '.' && entry.name !== '..')
@@ -123,7 +116,7 @@ export async function list(connId: string, dirPath: string): Promise<FileEntry[]
       const isDir = entry.isDirectory;
       return {
         name: entry.name,
-        path: path.posix.join(dirPath, entry.name),
+        path: joinVirtualPath(normalizedDirPath, entry.name),
         size: entry.size,
         modifiedAt: entry.modifiedAt ? entry.modifiedAt.getTime() : 0,
         isDirectory: isDir,
@@ -145,19 +138,31 @@ export async function upload(
   localPath: string,
   remotePath: string,
   onProgress?: (transferred: number, total: number) => void,
+  signal?: AbortSignal,
 ): Promise<void> {
-  const { client } = getConn(connId);
-
-  if (onProgress) {
-    client.trackProgress((info) => {
-      onProgress(info.bytes, info.bytesOverall);
-    });
-  }
+  throwIfAborted(signal);
+  const conn = getConn(connId);
+  const remoteServerPath = resolveServerPath(conn, remotePath);
+  const total = fs.statSync(localPath).size;
+  let transferred = 0;
+  const readStream = fs.createReadStream(localPath);
+  const throttle = createRateLimitedTransform((chunkBytes) => {
+    transferred += chunkBytes;
+    onProgress?.(transferred, total);
+  });
+  const cleanupAbort = bindAbort(signal, () => {
+    const abortError = createAbortError();
+    readStream.destroy(abortError);
+    throttle.destroy(abortError);
+  });
+  readStream.on('error', (error) => throttle.destroy(error));
+  readStream.pipe(throttle);
 
   try {
-    await client.uploadFrom(localPath, remotePath);
+    await conn.client.uploadFrom(throttle, remoteServerPath);
   } finally {
-    client.trackProgress();
+    cleanupAbort();
+    readStream.destroy();
   }
 }
 
@@ -166,27 +171,48 @@ export async function download(
   remotePath: string,
   localPath: string,
   onProgress?: (transferred: number, total: number) => void,
+  signal?: AbortSignal,
 ): Promise<void> {
-  const { client } = getConn(connId);
+  throwIfAborted(signal);
+  const conn = getConn(connId);
+  const remoteServerPath = resolveServerPath(conn, remotePath);
+  const total = (await stat(connId, remotePath)).size;
+  let transferred = 0;
+  const throttle = createRateLimitedTransform((chunkBytes) => {
+    transferred += chunkBytes;
+    onProgress?.(transferred, total);
+  });
 
-  if (onProgress) {
-    client.trackProgress((info) => {
-      onProgress(info.bytes, info.bytesOverall);
-    });
-  }
+  // Ensure local directory exists
+  fs.mkdirSync(path.dirname(localPath), { recursive: true });
+
+  const writeStream = fs.createWriteStream(localPath);
+  const cleanupAbort = bindAbort(signal, () => {
+    const abortError = createAbortError();
+    throttle.destroy(abortError);
+    writeStream.destroy(abortError);
+  });
+  const streamClosed = new Promise<void>((resolve, reject) => {
+    writeStream.on('close', () => resolve());
+    writeStream.on('error', (error) => reject(error));
+    throttle.on('error', (error) => reject(error));
+  });
+  throttle.pipe(writeStream);
 
   try {
-    await client.downloadTo(localPath, remotePath);
+    await conn.client.downloadTo(throttle, remoteServerPath);
+    await streamClosed;
   } finally {
-    client.trackProgress();
+    cleanupAbort();
+    throttle.destroy();
   }
 }
 
 export async function mkdir(connId: string, dirPath: string): Promise<void> {
-  const { client } = getConn(connId);
-  await client.ensureDir(dirPath);
-  // ensureDir changes working directory — go back to root
-  await client.cd('/');
+  const conn = getConn(connId);
+  await conn.client.ensureDir(resolveServerPath(conn, dirPath));
+  // ensureDir changes working directory — restore the login directory root
+  await resetWorkingDir(conn);
 }
 
 export async function rename(
@@ -194,16 +220,50 @@ export async function rename(
   oldPath: string,
   newPath: string,
 ): Promise<void> {
-  const { client } = getConn(connId);
-  await client.rename(oldPath, newPath);
+  const conn = getConn(connId);
+  await conn.client.rename(resolveServerPath(conn, oldPath), resolveServerPath(conn, newPath));
+}
+
+export async function stat(connId: string, targetPath: string): Promise<FileEntry> {
+  const normalizedTargetPath = normalizeAbsolutePath(targetPath);
+
+  if (normalizedTargetPath === '/') {
+    return {
+      name: '/',
+      path: '/',
+      size: 0,
+      modifiedAt: 0,
+      isDirectory: true,
+      permissions: 'drwxr-xr-x',
+    };
+  }
+
+  const parentPath = normalizeAbsolutePath(path.posix.dirname(normalizedTargetPath));
+  const baseName = path.posix.basename(normalizedTargetPath);
+  const entries = await list(connId, parentPath);
+  const entry = entries.find((candidate) => candidate.name === baseName);
+
+  if (!entry) {
+    throw new Error(`stat failed: "${normalizedTargetPath}" not found`);
+  }
+
+  return {
+    name: entry.name,
+    path: normalizedTargetPath,
+    size: entry.size,
+    modifiedAt: entry.modifiedAt,
+    isDirectory: entry.isDirectory,
+    permissions: entry.permissions,
+  };
 }
 
 export async function del(connId: string, targetPath: string): Promise<void> {
-  const { client } = getConn(connId);
+  const conn = getConn(connId);
+  const serverTargetPath = resolveServerPath(conn, targetPath);
 
   // Try to detect if target is a directory by listing it
   try {
-    const entries = await client.list(targetPath);
+    const entries = await conn.client.list(serverTargetPath);
     // If list succeeds without error and targetPath doesn't look like a file
     // that just happened to have entries, treat it as a directory.
     // basic-ftp's list on a file may return one entry; for a dir, the contents.
@@ -213,14 +273,14 @@ export async function del(connId: string, targetPath: string): Promise<void> {
       entries.length > 1;
 
     if (isDir) {
-      await client.removeDir(targetPath);
+      await conn.client.removeDir(serverTargetPath);
       return;
     }
   } catch {
     // list failed — it's a file (or doesn't exist)
   }
 
-  await client.remove(targetPath);
+  await conn.client.remove(serverTargetPath);
 }
 
 // ── Transfer Resume ────────────────────────────────────────────
@@ -231,11 +291,12 @@ export async function resumeTransfer(
   localPath: string,
   remotePath: string,
   onProgress?: (transferred: number, total: number) => void,
+  signal?: AbortSignal,
 ): Promise<void> {
   if (direction === 'upload') {
-    return resumeUpload(connId, localPath, remotePath, onProgress);
+    return resumeUpload(connId, localPath, remotePath, onProgress, signal);
   } else {
-    return resumeDownload(connId, remotePath, localPath, onProgress);
+    return resumeDownload(connId, remotePath, localPath, onProgress, signal);
   }
 }
 
@@ -244,15 +305,18 @@ async function resumeUpload(
   localPath: string,
   remotePath: string,
   onProgress?: (transferred: number, total: number) => void,
+  signal?: AbortSignal,
 ): Promise<void> {
-  const { client } = getConn(connId);
+  throwIfAborted(signal);
+  const conn = getConn(connId);
+  const remoteServerPath = resolveServerPath(conn, remotePath);
   const fileStat = fs.statSync(localPath);
   const total = fileStat.size;
 
   // Check remote file size for resume
   let remoteSize = 0;
   try {
-    remoteSize = await client.size(remotePath);
+    remoteSize = await conn.client.size(remoteServerPath);
   } catch {
     // File doesn't exist remotely — start from 0
   }
@@ -261,23 +325,29 @@ async function resumeUpload(
     onProgress?.(total, total);
     return;
   }
-
-  if (onProgress) {
-    client.trackProgress((info) => {
-      onProgress(remoteSize + info.bytes, total);
-    });
-  }
+  let transferred = remoteSize;
+  const readStream = fs.createReadStream(localPath, { start: remoteSize });
+  const throttle = createRateLimitedTransform((chunkBytes) => {
+    transferred += chunkBytes;
+    onProgress?.(transferred, total);
+  });
+  const cleanupAbort = bindAbort(signal, () => {
+    const abortError = createAbortError();
+    readStream.destroy(abortError);
+    throttle.destroy(abortError);
+  });
+  readStream.on('error', (error) => throttle.destroy(error));
+  readStream.pipe(throttle);
 
   try {
     if (remoteSize > 0) {
-      // Use appendFrom for resume -- basic-ftp uses APPE command
-      const stream = fs.createReadStream(localPath, { start: remoteSize });
-      await client.appendFrom(stream, remotePath);
+      await conn.client.appendFrom(throttle, remoteServerPath);
     } else {
-      await client.uploadFrom(localPath, remotePath);
+      await conn.client.uploadFrom(throttle, remoteServerPath);
     }
   } finally {
-    client.trackProgress();
+    cleanupAbort();
+    readStream.destroy();
   }
 }
 
@@ -286,16 +356,19 @@ async function resumeDownload(
   remotePath: string,
   localPath: string,
   onProgress?: (transferred: number, total: number) => void,
+  signal?: AbortSignal,
 ): Promise<void> {
-  const { client } = getConn(connId);
+  const conn = getConn(connId);
+  const remoteServerPath = resolveServerPath(conn, remotePath);
+  throwIfAborted(signal);
 
   // Get remote file size
   let total = 0;
   try {
-    total = await client.size(remotePath);
+    total = await conn.client.size(remoteServerPath);
   } catch {
     // Fall back to non-resume download
-    return download(connId, remotePath, localPath, onProgress);
+    return download(connId, remotePath, localPath, onProgress, signal);
   }
 
   // Check local file size for resume
@@ -315,18 +388,30 @@ async function resumeDownload(
   // Ensure local directory exists
   const dir = path.dirname(localPath);
   fs.mkdirSync(dir, { recursive: true });
-
-  if (onProgress) {
-    client.trackProgress((info) => {
-      onProgress(localSize + info.bytes, total);
-    });
-  }
+  let transferred = localSize;
+  const throttle = createRateLimitedTransform((chunkBytes) => {
+    transferred += chunkBytes;
+    onProgress?.(transferred, total);
+  });
+  const writeStream = fs.createWriteStream(localPath, { flags: localSize > 0 ? 'a' : 'w' });
+  const cleanupAbort = bindAbort(signal, () => {
+    const abortError = createAbortError();
+    throttle.destroy(abortError);
+    writeStream.destroy(abortError);
+  });
+  const streamClosed = new Promise<void>((resolve, reject) => {
+    writeStream.on('close', () => resolve());
+    writeStream.on('error', (error) => reject(error));
+    throttle.on('error', (error) => reject(error));
+  });
+  throttle.pipe(writeStream);
 
   try {
-    const stream = fs.createWriteStream(localPath, { flags: localSize > 0 ? 'a' : 'w' });
-    await client.downloadTo(stream, remotePath, localSize);
+    await conn.client.downloadTo(throttle, remoteServerPath, localSize);
+    await streamClosed;
   } finally {
-    client.trackProgress();
+    cleanupAbort();
+    throttle.destroy();
   }
 }
 
@@ -337,37 +422,44 @@ export async function uploadDir(
   localDir: string,
   remoteDir: string,
   onProgress?: (file: string, fileIndex: number, totalFiles: number) => void,
+  signal?: AbortSignal,
 ): Promise<void> {
-  const { client } = getConn(connId);
+  throwIfAborted(signal);
+  const allFiles: { local: string; remote: string }[] = [];
 
-  if (onProgress) {
-    // Count all files first
-    const allFiles: string[] = [];
-    const countFiles = (dir: string) => {
-      const items = fs.readdirSync(dir, { withFileTypes: true });
-      for (const item of items) {
-        const fullPath = path.join(dir, item.name);
-        if (item.isDirectory()) {
-          countFiles(fullPath);
-        } else {
-          allFiles.push(fullPath);
-        }
+  const gather = (localBase: string, remoteBase: string) => {
+    const items = fs.readdirSync(localBase, { withFileTypes: true });
+    for (const item of items) {
+      const localPath = path.join(localBase, item.name);
+      const remotePath = path.posix.join(remoteBase, item.name);
+      if (item.isDirectory()) {
+        gather(localPath, remotePath);
+      } else {
+        allFiles.push({ local: localPath, remote: remotePath });
       }
-    };
-    countFiles(localDir);
-
-    let fileIndex = 0;
-    client.trackProgress((info) => {
-      onProgress(info.name, fileIndex + 1, allFiles.length);
-    });
-
-    try {
-      await client.uploadFromDir(localDir, remoteDir);
-    } finally {
-      client.trackProgress();
     }
-  } else {
-    await client.uploadFromDir(localDir, remoteDir);
+  };
+  gather(localDir, remoteDir);
+
+  const createDirs = async (localBase: string, remoteBase: string) => {
+    throwIfAborted(signal);
+    const items = fs.readdirSync(localBase, { withFileTypes: true });
+    for (const item of items) {
+      if (!item.isDirectory()) continue;
+      const remotePath = path.posix.join(remoteBase, item.name);
+      await mkdir(connId, remotePath);
+      await createDirs(path.join(localBase, item.name), remotePath);
+    }
+  };
+
+  await mkdir(connId, remoteDir);
+  await createDirs(localDir, remoteDir);
+
+  for (let i = 0; i < allFiles.length; i += 1) {
+    throwIfAborted(signal);
+    const file = allFiles[i];
+    onProgress?.(file.local, i + 1, allFiles.length);
+    await upload(connId, file.local, file.remote, undefined, signal);
   }
 }
 
@@ -376,62 +468,51 @@ export async function downloadDir(
   remoteDir: string,
   localDir: string,
   onProgress?: (file: string, fileIndex: number, totalFiles: number) => void,
+  signal?: AbortSignal,
 ): Promise<void> {
-  const { client } = getConn(connId);
-
+  throwIfAborted(signal);
   // Ensure local directory exists
   fs.mkdirSync(localDir, { recursive: true });
+  const allFiles: { remote: string; local: string }[] = [];
 
-  if (onProgress) {
-    // Count remote files first
-    const allFiles: string[] = [];
-    const countFiles = async (dir: string) => {
-      const entries = await client.list(dir);
-      for (const entry of entries) {
-        if (entry.name === '.' || entry.name === '..') continue;
-        const fullPath = path.posix.join(dir, entry.name);
-        if (entry.isDirectory) {
-          await countFiles(fullPath);
-        } else {
-          allFiles.push(fullPath);
-        }
+  const gather = async (remoteBase: string, localBase: string) => {
+    throwIfAborted(signal);
+    const entries = await list(connId, remoteBase);
+    for (const entry of entries) {
+      const remotePath = path.posix.join(remoteBase, entry.name);
+      const localPath = path.join(localBase, entry.name);
+      if (entry.isDirectory) {
+        fs.mkdirSync(localPath, { recursive: true });
+        await gather(remotePath, localPath);
+      } else {
+        allFiles.push({ remote: remotePath, local: localPath });
       }
-    };
-    await countFiles(remoteDir);
-
-    let fileIndex = 0;
-    client.trackProgress((info) => {
-      onProgress(info.name, fileIndex + 1, allFiles.length);
-    });
-
-    try {
-      await client.downloadToDir(localDir, remoteDir);
-    } finally {
-      client.trackProgress();
     }
-  } else {
-    await client.downloadToDir(localDir, remoteDir);
+  };
+  await gather(remoteDir, localDir);
+
+  for (let i = 0; i < allFiles.length; i += 1) {
+    throwIfAborted(signal);
+    const file = allFiles[i];
+    onProgress?.(file.remote, i + 1, allFiles.length);
+    await download(connId, file.remote, file.local, undefined, signal);
   }
 }
 
 export async function deleteDir(connId: string, dirPath: string): Promise<void> {
-  const { client } = getConn(connId);
-
-  // Recursively list and delete all contents
-  const entries = await client.list(dirPath);
+  const conn = getConn(connId);
+  const entries = await list(connId, dirPath);
 
   for (const entry of entries) {
-    if (entry.name === '.' || entry.name === '..') continue;
-    const fullPath = path.posix.join(dirPath, entry.name);
     if (entry.isDirectory) {
-      await deleteDir(connId, fullPath);
+      await deleteDir(connId, entry.path);
     } else {
-      await client.remove(fullPath);
+      await conn.client.remove(resolveServerPath(conn, entry.path));
     }
   }
 
   // Remove the now-empty directory
-  await client.removeDir(dirPath);
+  await conn.client.removeDir(resolveServerPath(conn, dirPath));
 }
 
 // ── Search ──────────────────────────────────────────────────────
@@ -479,6 +560,53 @@ function globToRegex(glob: string): RegExp {
 }
 
 // ── Helpers ────────────────────────────────────────────────────
+
+function normalizeAbsolutePath(targetPath: string): string {
+  const trimmed = targetPath.trim();
+  const candidate = trimmed ? trimmed : '/';
+  const withLeadingSlash = candidate.startsWith('/') ? candidate : `/${candidate}`;
+  const normalized = path.posix.normalize(withLeadingSlash);
+  return normalized.startsWith('/') ? normalized : `/${normalized}`;
+}
+
+function joinVirtualPath(basePath: string, name: string): string {
+  return basePath === '/' ? `/${name}` : `${basePath}/${name}`;
+}
+
+function resolveServerPath(conn: PooledFTP, targetPath: string): string {
+  const normalizedTargetPath = normalizeAbsolutePath(targetPath);
+  if (conn.rootDir === '/') {
+    return normalizedTargetPath;
+  }
+  if (normalizedTargetPath === '/') {
+    return conn.rootDir;
+  }
+  return path.posix.join(conn.rootDir, normalizedTargetPath.slice(1));
+}
+
+async function resetWorkingDir(conn: PooledFTP): Promise<void> {
+  try {
+    await conn.client.cd(conn.rootDir);
+  } catch {
+    // Ignore — absolute path operations do not rely on the current directory.
+  }
+}
+
+async function listDirectory(conn: PooledFTP, dirPath: string): Promise<FileInfo[]> {
+  try {
+    return await conn.client.list(resolveServerPath(conn, dirPath));
+  } catch (error) {
+    if (dirPath !== '/') {
+      throw error;
+    }
+
+    // Some FTP servers reject LIST on absolute root paths even though the
+    // login directory itself is readable. Re-anchor to the session root and
+    // list the current directory instead.
+    await resetWorkingDir(conn);
+    return conn.client.list();
+  }
+}
 
 function formatPermissions(entry: FileInfo): string {
   const type = entry.isDirectory ? 'd' : '-';

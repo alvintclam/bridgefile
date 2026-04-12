@@ -95,7 +95,9 @@ export type TransferDirection = 'upload' | 'download';
 
 export interface TransferItem {
   id: string;
+  protocol: ProtocolType;
   connectionId: string;
+  entryType: 'file' | 'directory';
   direction: TransferDirection;
   localPath: string;
   remotePath: string;
@@ -103,9 +105,17 @@ export interface TransferItem {
   size: number;
   transferred: number;
   status: TransferStatus;
+  currentFile?: string;
   error?: string;
   startedAt?: number;
   completedAt?: number;
+}
+
+export interface TransferQueueState {
+  items: TransferItem[];
+  maxConcurrent: number;
+  paused: boolean;
+  speedLimitMbps: number | null;
 }
 
 // ── IPC channel map (keeps preload and handlers in sync) ────────
@@ -127,8 +137,8 @@ export interface IPCChannels {
   'sftp:rename': (connId: string, oldPath: string, newPath: string) => void;
   'sftp:delete': (connId: string, path: string) => void;
   'sftp:stat': (connId: string, path: string) => FileEntry;
-  'sftp:uploadDir': (connId: string, localDir: string, remoteDir: string) => void;
-  'sftp:downloadDir': (connId: string, remoteDir: string, localDir: string) => void;
+  'sftp:uploadDir': (connId: string, localDir: string, remoteDir: string) => string;
+  'sftp:downloadDir': (connId: string, remoteDir: string, localDir: string) => string;
   'sftp:deleteDir': (connId: string, dirPath: string) => void;
   'sftp:chmod': (connId: string, path: string, mode: number) => void;
   'sftp:resumeTransfer': (
@@ -147,8 +157,9 @@ export interface IPCChannels {
   'ftp:mkdir': (connId: string, path: string) => void;
   'ftp:rename': (connId: string, oldPath: string, newPath: string) => void;
   'ftp:delete': (connId: string, path: string) => void;
-  'ftp:uploadDir': (connId: string, localDir: string, remoteDir: string) => void;
-  'ftp:downloadDir': (connId: string, remoteDir: string, localDir: string) => void;
+  'ftp:stat': (connId: string, path: string) => FileEntry;
+  'ftp:uploadDir': (connId: string, localDir: string, remoteDir: string) => string;
+  'ftp:downloadDir': (connId: string, remoteDir: string, localDir: string) => string;
   'ftp:deleteDir': (connId: string, dirPath: string) => void;
   'ftp:resumeTransfer': (
     connId: string,
@@ -166,18 +177,31 @@ export interface IPCChannels {
   's3:mkdir': (connId: string, path: string) => void;
   's3:rename': (connId: string, oldKey: string, newKey: string) => void;
   's3:delete': (connId: string, key: string) => void;
-  's3:uploadDir': (connId: string, localDir: string, remoteDir: string) => void;
-  's3:downloadDir': (connId: string, remoteDir: string, localDir: string) => void;
+  's3:stat': (connId: string, path: string) => FileEntry;
+  's3:uploadDir': (connId: string, localDir: string, remoteDir: string) => string;
+  's3:downloadDir': (connId: string, remoteDir: string, localDir: string) => string;
   's3:deleteDir': (connId: string, dirPath: string) => void;
 
   // Transfer queue
   'transfer:getQueue': () => TransferItem[];
+  'transfer:getState': () => TransferQueueState;
   'transfer:cancel': (transferId: string) => void;
   'transfer:retry': (transferId: string) => void;
+  'transfer:setMaxConcurrent': (maxConcurrent: number) => number;
+  'transfer:setPaused': (paused: boolean) => boolean;
+  'transfer:setSpeedLimit': (speedLimitMbps: number | null) => number | null;
+  'transfer:moveToTop': (transferId: string) => boolean;
+  'transfer:clearFinished': () => void;
 
   // Local filesystem
   'fs:listLocal': (dirPath: string) => FileEntry[];
   'fs:getHomeDir': () => string;
+  'fs:mkdir': (dirPath: string) => void;
+  'fs:rename': (oldPath: string, newPath: string) => void;
+  'fs:delete': (targetPath: string) => void;
+  'fs:readTextFile': (filePath: string) => string;
+  'fs:writeTextFile': (filePath: string, content: string) => void;
+  'fs:stat': (targetPath: string) => FileEntry;
 
   // Bookmarks
   'bookmarks:getAll': () => BookmarkEntry[];
@@ -192,6 +216,12 @@ export interface IPCChannels {
   // Remote file editing
   'app:editRemoteFile': (protocol: string, connId: string, remotePath: string) => string;
   'app:saveRemoteFile': (protocol: string, connId: string, remotePath: string, content: string) => void;
+  'app:computeRemoteChecksum': (
+    protocol: ProtocolType,
+    connId: string,
+    remotePath: string,
+    algorithm: string,
+  ) => string;
 
   // Log export
   'app:exportLogs': (content: string) => boolean;
