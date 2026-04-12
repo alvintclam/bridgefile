@@ -14,6 +14,10 @@ import SearchDialog from './components/SearchDialog';
 import FileEditor from './components/FileEditor';
 import ChecksumDialog from './components/ChecksumDialog';
 import PermissionsDialog from './components/PermissionsDialog';
+import OverwriteConfirmDialog from './components/OverwriteConfirmDialog';
+import type { OverwriteAction, OverwriteDialogRequest, FileInfo } from './components/OverwriteConfirmDialog';
+import { emptyOverwriteRequest } from './components/OverwriteConfirmDialog';
+import { addLog } from './components/LogPanel';
 
 type BottomTab = 'transfers' | 'log';
 
@@ -86,6 +90,20 @@ function isMissingPathError(error: unknown): boolean {
   return /ENOENT|not found|no such file|no such key|550/i.test(message);
 }
 
+function generateAutoRenamePath(filePath: string): string {
+  const lastSlash = filePath.lastIndexOf('/');
+  const dir = lastSlash >= 0 ? filePath.substring(0, lastSlash + 1) : '';
+  const basename = lastSlash >= 0 ? filePath.substring(lastSlash + 1) : filePath;
+  const dotIdx = basename.lastIndexOf('.');
+  const name = dotIdx > 0 ? basename.substring(0, dotIdx) : basename;
+  const ext = dotIdx > 0 ? basename.substring(dotIdx) : '';
+  const match = name.match(/^(.+)_(\d+)$/);
+  if (match) {
+    return `${dir}${match[1]}_${Number(match[2]) + 1}${ext}`;
+  }
+  return `${dir}${name}_1${ext}`;
+}
+
 export default function App() {
   // ── Multi-tab session state ─────────────────────────────────
   const [tabs, setTabs] = useState<SessionTab[]>([]);
@@ -145,6 +163,9 @@ export default function App() {
   const [bottomCollapsed, setBottomCollapsed] = useState(false);
   const [bottomHeight, setBottomHeight] = useState(220);
   const [dividerPos, setDividerPos] = useState(50);
+
+  // ── Overwrite dialog state ──────────────────────────────────
+  const [overwriteRequest, setOverwriteRequest] = useState<OverwriteDialogRequest>(emptyOverwriteRequest);
 
   // ── Dialog state ──────────────────────────────────────────────
   const [showCompare, setShowCompare] = useState(false);
@@ -433,48 +454,82 @@ export default function App() {
     [remoteProtocol, connectionId],
   );
 
-  const confirmDestinationTransfer = useCallback(
-    async (
-      destinationSide: 'local' | 'remote',
-      targetPath: string,
+  // ── Overwrite dialog helpers ─────────────────────────────────
+
+  const showOverwriteDialog = useCallback(
+    (
       sourceName: string,
-      sourceIsDirectory: boolean,
-    ) => {
-      const existingEntry =
-        destinationSide === 'local'
-          ? await getLocalEntryIfExists(targetPath)
-          : await getRemoteEntryIfExists(targetPath);
-
-      if (!existingEntry) {
-        return true;
-      }
-
-      const sourceType = sourceIsDirectory ? 'folder' : 'file';
-      const destinationType = existingEntry.isDirectory ? 'folder' : 'file';
-
-      if (existingEntry.isDirectory !== sourceIsDirectory) {
-        throw new Error(
-          `Cannot transfer "${sourceName}" because ${targetPath} is an existing ${destinationType}.`,
-        );
-      }
-
-      const destinationLabel = destinationSide === 'local' ? 'local' : 'remote';
-      const message = sourceIsDirectory
-        ? `The ${destinationLabel} folder "${targetPath}" already exists.\n\nContinue and merge/overwrite its contents?`
-        : `The ${destinationLabel} file "${targetPath}" already exists.\n\nReplace it with "${sourceName}"?`;
-
-      const shouldContinue =
-        typeof window === 'undefined' || typeof window.confirm !== 'function'
-          ? true
-          : window.confirm(message);
-
-      if (!shouldContinue) {
-        logError(`Skipped ${sourceType} "${sourceName}" because destination already exists: ${targetPath}`);
-      }
-
-      return shouldContinue;
+      sourceInfo: FileInfo | null,
+      destInfo: FileInfo | null,
+      isDirectory: boolean,
+    ): Promise<{ action: OverwriteAction; applyToAll: boolean }> => {
+      return new Promise((resolve) => {
+        setOverwriteRequest({
+          visible: true,
+          sourceName,
+          sourceInfo,
+          destInfo,
+          isDirectory,
+          protocol: remoteProtocol,
+          resolve,
+        });
+      });
     },
-    [getLocalEntryIfExists, getRemoteEntryIfExists],
+    [remoteProtocol],
+  );
+
+  const handleOverwriteResponse = useCallback(
+    (action: OverwriteAction, applyToAll: boolean) => {
+      if (overwriteRequest.resolve) {
+        overwriteRequest.resolve({ action, applyToAll });
+      }
+      setOverwriteRequest(emptyOverwriteRequest);
+    },
+    [overwriteRequest.resolve],
+  );
+
+  const toFileInfo = (entry: { name: string; size: number; modifiedAt: number } | null): FileInfo | null => {
+    if (!entry) return null;
+    return { name: entry.name, size: entry.size, modifiedAt: entry.modifiedAt };
+  };
+
+  /**
+   * Resolve what to do when the destination already exists.
+   * Returns { proceed, useResume, destPath } or null to skip.
+   */
+  const resolveOverwriteAction = useCallback(
+    async (
+      action: OverwriteAction,
+      sourceInfo: FileInfo | null,
+      destInfo: FileInfo | null,
+      destPath: string,
+    ): Promise<{ proceed: boolean; useResume: boolean; destPath: string }> => {
+      switch (action) {
+        case 'skip':
+          return { proceed: false, useResume: false, destPath };
+        case 'overwrite':
+          return { proceed: true, useResume: false, destPath };
+        case 'overwrite-if-newer':
+          if (sourceInfo && destInfo && sourceInfo.modifiedAt <= destInfo.modifiedAt) {
+            addLog('info', `Skipped "${sourceInfo.name}" (destination is same age or newer)`);
+            return { proceed: false, useResume: false, destPath };
+          }
+          return { proceed: true, useResume: false, destPath };
+        case 'overwrite-if-different-size':
+          if (sourceInfo && destInfo && sourceInfo.size === destInfo.size) {
+            addLog('info', `Skipped "${sourceInfo.name}" (same size)`);
+            return { proceed: false, useResume: false, destPath };
+          }
+          return { proceed: true, useResume: false, destPath };
+        case 'resume':
+          return { proceed: true, useResume: true, destPath };
+        case 'rename':
+          return { proceed: true, useResume: false, destPath: generateAutoRenamePath(destPath) };
+        default:
+          return { proceed: true, useResume: false, destPath };
+      }
+    },
+    [],
   );
 
   // ── File transfer handler (sequential to avoid FTP single-connection issues) ──
@@ -492,38 +547,85 @@ export default function App() {
 
       const currentRemotePath = normalizePath(remotePath || '/');
       const currentLocalPath = normalizePath(localPath || '/');
+      let batchAction: OverwriteAction | null = null;
 
       for (const file of files) {
         try {
-          if (direction === 'upload') {
-            const local = joinChildPath(sourcePath, file.name);
-            const remote = joinChildPath(currentRemotePath, file.name);
-            const shouldTransfer = await confirmDestinationTransfer(
-              'remote',
-              remote,
-              file.name,
-              file.isDirectory,
-            );
-            if (!shouldTransfer) {
+          const isUpload = direction === 'upload';
+          let local = isUpload
+            ? joinChildPath(sourcePath, file.name)
+            : joinChildPath(currentLocalPath, file.name);
+          let remote = isUpload
+            ? joinChildPath(currentRemotePath, file.name)
+            : joinChildPath(sourcePath, file.name);
+
+          // Check if destination exists
+          const destEntry = isUpload
+            ? await getRemoteEntryIfExists(remote)
+            : await getLocalEntryIfExists(local);
+
+          if (destEntry) {
+            // Type mismatch check
+            if (destEntry.isDirectory !== file.isDirectory) {
+              throw new Error(
+                `Cannot transfer "${file.name}" because destination is a ${destEntry.isDirectory ? 'folder' : 'file'}.`,
+              );
+            }
+
+            let action: OverwriteAction;
+            let sourceInfo: FileInfo | null = null;
+            const destInfo = toFileInfo(destEntry);
+
+            if (batchAction) {
+              action = batchAction;
+              // For conditional actions, still need source info
+              if (action === 'overwrite-if-newer' || action === 'overwrite-if-different-size') {
+                const srcEntry = isUpload
+                  ? await getLocalEntryIfExists(local)
+                  : await getRemoteEntryIfExists(remote);
+                sourceInfo = toFileInfo(srcEntry);
+              }
+            } else {
+              // Get source info for comparison display
+              const srcEntry = isUpload
+                ? await getLocalEntryIfExists(local)
+                : await getRemoteEntryIfExists(remote);
+              sourceInfo = toFileInfo(srcEntry);
+
+              const result = await showOverwriteDialog(file.name, sourceInfo, destInfo, file.isDirectory);
+              action = result.action;
+              if (result.applyToAll) {
+                batchAction = action;
+              }
+            }
+
+            const resolution = await resolveOverwriteAction(action, sourceInfo ?? toFileInfo(destEntry), destInfo, isUpload ? remote : local);
+            if (!resolution.proceed) {
               continue;
             }
+
+            // Apply renamed path
+            if (isUpload) {
+              remote = resolution.destPath;
+            } else {
+              local = resolution.destPath;
+            }
+
+            // Handle resume
+            if (resolution.useResume && !file.isDirectory && (remoteProtocol === 'sftp' || remoteProtocol === 'ftp')) {
+              await (api as any).resumeTransfer(connectionId, direction, local, remote);
+              continue;
+            }
+          }
+
+          // Proceed with transfer
+          if (isUpload) {
             if (file.isDirectory) {
               await api.uploadDir(connectionId, local, remote);
             } else {
               await api.upload(connectionId, local, remote);
             }
           } else {
-            const remote = joinChildPath(sourcePath, file.name);
-            const local = joinChildPath(currentLocalPath, file.name);
-            const shouldTransfer = await confirmDestinationTransfer(
-              'local',
-              local,
-              file.name,
-              file.isDirectory,
-            );
-            if (!shouldTransfer) {
-              continue;
-            }
             if (file.isDirectory) {
               await api.downloadDir(connectionId, remote, local);
             } else {
@@ -536,7 +638,7 @@ export default function App() {
         }
       }
     },
-    [remoteProtocol, connectionId, remotePath, localPath, confirmDestinationTransfer],
+    [remoteProtocol, connectionId, remotePath, localPath, getLocalEntryIfExists, getRemoteEntryIfExists, showOverwriteDialog, resolveOverwriteAction],
   );
 
   // ── Desktop drop handler (sequential) ──────────────────────
@@ -551,22 +653,58 @@ export default function App() {
         : null;
       if (!api || !bridgefile) return;
 
+      let batchAction: OverwriteAction | null = null;
+
       for (const item of items) {
         try {
           const fileName = item.name || item.path.split(/[\\/]/).pop() || item.path;
-          const remote = joinChildPath(targetPath, fileName);
+          let remote = joinChildPath(targetPath, fileName);
           const localEntry = typeof item.isDirectory === 'boolean'
             ? { isDirectory: item.isDirectory }
             : await bridgefile.fs.stat(item.path);
-          const shouldTransfer = await confirmDestinationTransfer(
-            'remote',
-            remote,
-            fileName,
-            localEntry.isDirectory,
-          );
-          if (!shouldTransfer) {
-            continue;
+
+          // Check if destination exists
+          const destEntry = await getRemoteEntryIfExists(remote);
+
+          if (destEntry) {
+            if (destEntry.isDirectory !== localEntry.isDirectory) {
+              throw new Error(
+                `Cannot upload "${fileName}" because destination is a ${destEntry.isDirectory ? 'folder' : 'file'}.`,
+              );
+            }
+
+            let action: OverwriteAction;
+            let sourceInfo: FileInfo | null = null;
+            const destInfo = toFileInfo(destEntry);
+
+            if (batchAction) {
+              action = batchAction;
+              if (action === 'overwrite-if-newer' || action === 'overwrite-if-different-size') {
+                const srcEntry = await getLocalEntryIfExists(item.path);
+                sourceInfo = toFileInfo(srcEntry);
+              }
+            } else {
+              const srcEntry = await getLocalEntryIfExists(item.path);
+              sourceInfo = toFileInfo(srcEntry);
+              const result = await showOverwriteDialog(fileName, sourceInfo, destInfo, localEntry.isDirectory);
+              action = result.action;
+              if (result.applyToAll) {
+                batchAction = action;
+              }
+            }
+
+            const resolution = await resolveOverwriteAction(action, sourceInfo ?? toFileInfo(destEntry), destInfo, remote);
+            if (!resolution.proceed) {
+              continue;
+            }
+            remote = resolution.destPath;
+
+            if (resolution.useResume && !localEntry.isDirectory && (remoteProtocol === 'sftp' || remoteProtocol === 'ftp')) {
+              await (api as any).resumeTransfer(connectionId, 'upload', item.path, remote);
+              continue;
+            }
           }
+
           if (localEntry.isDirectory) {
             await api.uploadDir(connectionId, item.path, remote);
           } else {
@@ -578,7 +716,7 @@ export default function App() {
         }
       }
     },
-    [remoteProtocol, connectionId, confirmDestinationTransfer],
+    [remoteProtocol, connectionId, getLocalEntryIfExists, getRemoteEntryIfExists, showOverwriteDialog, resolveOverwriteAction],
   );
   return (
     <div
@@ -871,6 +1009,14 @@ export default function App() {
             setShowPermissions(false);
             setSelectedFile(null);
           }}
+        />
+      )}
+
+      {/* Overwrite confirm dialog */}
+      {overwriteRequest.visible && (
+        <OverwriteConfirmDialog
+          request={overwriteRequest}
+          onResponse={handleOverwriteResponse}
         />
       )}
     </div>
