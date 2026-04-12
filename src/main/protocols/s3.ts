@@ -11,6 +11,7 @@ import * as fs from 'fs';
 import * as path from 'path';
 import * as crypto from 'crypto';
 import { Readable } from 'stream';
+import { Upload } from '@aws-sdk/lib-storage';
 import type { S3Config, FileEntry } from '../../shared/types';
 import { bindAbort, createAbortError, throwIfAborted } from './transfer-abort';
 import { createRateLimitedTransform } from './transfer-rate-limit';
@@ -212,6 +213,8 @@ export async function list(connId: string, virtualPath: string): Promise<FileEnt
   return entries;
 }
 
+const MULTIPART_THRESHOLD = 20 * 1024 * 1024; // 20 MB
+
 export async function upload(
   connId: string,
   localPath: string,
@@ -222,12 +225,11 @@ export async function upload(
   throwIfAborted(signal);
   const conn = getConn(connId);
   const key = resolveKey(conn, remotePath);
-  const stat = fs.statSync(localPath);
-  const total = stat.size;
+  const fileStat = fs.statSync(localPath);
+  const total = fileStat.size;
 
-  // For files under 100 MB, use simple PutObject with a stream
   let transferred = 0;
-  const sourceStream = fs.createReadStream(localPath);
+  const sourceStream = fs.createReadStream(localPath, { highWaterMark: 256 * 1024 });
   const throttle = createRateLimitedTransform((chunkBytes) => {
     transferred += chunkBytes;
     onProgress?.(transferred, total);
@@ -241,14 +243,35 @@ export async function upload(
   sourceStream.pipe(throttle);
 
   try {
-    await conn.client.send(
-      new PutObjectCommand({
-        Bucket: conn.bucket,
-        Key: key,
-        Body: throttle,
-        ContentLength: total,
-      }),
-    );
+    if (total > MULTIPART_THRESHOLD) {
+      // Multipart upload with parallel parts for large files
+      const parallelUpload = new Upload({
+        client: conn.client,
+        params: {
+          Bucket: conn.bucket,
+          Key: key,
+          Body: throttle,
+          ContentLength: total,
+        },
+        queueSize: 4,
+        partSize: 10 * 1024 * 1024, // 10 MB parts
+        leavePartsOnError: false,
+      });
+      if (signal) {
+        signal.addEventListener('abort', () => parallelUpload.abort(), { once: true });
+      }
+      await parallelUpload.done();
+    } else {
+      // Simple PutObject for small files
+      await conn.client.send(
+        new PutObjectCommand({
+          Bucket: conn.bucket,
+          Key: key,
+          Body: throttle,
+          ContentLength: total,
+        }),
+      );
+    }
   } catch (err: any) {
     throw new Error(friendlyS3Error(err, conn.bucket));
   } finally {
@@ -291,7 +314,7 @@ export async function download(
     transferred += chunkBytes;
     onProgress?.(transferred, total);
   });
-  const writeStream = fs.createWriteStream(localPath);
+  const writeStream = fs.createWriteStream(localPath, { highWaterMark: 256 * 1024 });
   let transferred = 0;
   const cleanupAbort = bindAbort(signal, () => {
     const abortError = createAbortError();

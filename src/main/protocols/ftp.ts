@@ -145,7 +145,7 @@ export async function upload(
   const remoteServerPath = resolveServerPath(conn, remotePath);
   const total = fs.statSync(localPath).size;
   let transferred = 0;
-  const readStream = fs.createReadStream(localPath);
+  const readStream = fs.createReadStream(localPath, { highWaterMark: 256 * 1024 });
   const throttle = createRateLimitedTransform((chunkBytes) => {
     transferred += chunkBytes;
     onProgress?.(transferred, total);
@@ -186,7 +186,7 @@ export async function download(
   // Ensure local directory exists
   fs.mkdirSync(path.dirname(localPath), { recursive: true });
 
-  const writeStream = fs.createWriteStream(localPath);
+  const writeStream = fs.createWriteStream(localPath, { highWaterMark: 256 * 1024 });
   const cleanupAbort = bindAbort(signal, () => {
     const abortError = createAbortError();
     throttle.destroy(abortError);
@@ -317,7 +317,7 @@ async function resumeUpload(
     return;
   }
   let transferred = remoteSize;
-  const readStream = fs.createReadStream(localPath, { start: remoteSize });
+  const readStream = fs.createReadStream(localPath, { start: remoteSize, highWaterMark: 256 * 1024 });
   const throttle = createRateLimitedTransform((chunkBytes) => {
     transferred += chunkBytes;
     onProgress?.(transferred, total);
@@ -384,7 +384,7 @@ async function resumeDownload(
     transferred += chunkBytes;
     onProgress?.(transferred, total);
   });
-  const writeStream = fs.createWriteStream(localPath, { flags: localSize > 0 ? 'a' : 'w' });
+  const writeStream = fs.createWriteStream(localPath, { flags: localSize > 0 ? 'a' : 'w', highWaterMark: 256 * 1024 });
   const cleanupAbort = bindAbort(signal, () => {
     const abortError = createAbortError();
     throttle.destroy(abortError);

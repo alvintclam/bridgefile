@@ -5,7 +5,7 @@ import * as crypto from 'crypto';
 import * as os from 'os';
 import type { SFTPConfig, FileEntry } from '../../shared/types';
 import { bindAbort, createAbortError, throwIfAborted } from './transfer-abort';
-import { createRateLimitedTransform } from './transfer-rate-limit';
+import { createRateLimitedTransform, getTransferSpeedLimit } from './transfer-rate-limit';
 
 // ── Connection pool ────────────────────────────────────────────
 
@@ -99,7 +99,7 @@ async function reconnect(connId: string): Promise<PooledConnection> {
       readyTimeout: (old.config.timeout ?? 30) * 1000,
       keepaliveInterval: 10_000,
       algorithms: {
-        compress: ['zlib@openssh.com', 'zlib', 'none'],
+        compress: ['none', 'zlib@openssh.com', 'zlib'],
       },
     };
 
@@ -183,7 +183,7 @@ export async function connect(config: SFTPConfig): Promise<string> {
       readyTimeout: (normalizedConfig.timeout ?? 30) * 1000,
       keepaliveInterval: 10_000,
       algorithms: {
-        compress: ['zlib@openssh.com', 'zlib', 'none'],
+        compress: ['none', 'zlib@openssh.com', 'zlib'],
       },
     };
 
@@ -239,7 +239,7 @@ async function connectViaProxy(id: string, config: SFTPConfig): Promise<string> 
       readyTimeout: (config.timeout ?? 30) * 1000,
       keepaliveInterval: 10_000,
       algorithms: {
-        compress: ['zlib@openssh.com', 'zlib', 'none'],
+        compress: ['none', 'zlib@openssh.com', 'zlib'],
       },
     };
 
@@ -270,7 +270,7 @@ async function connectViaProxy(id: string, config: SFTPConfig): Promise<string> 
             readyTimeout: (config.timeout ?? 30) * 1000,
             keepaliveInterval: 10_000,
             algorithms: {
-              compress: ['zlib@openssh.com', 'zlib', 'none'],
+              compress: ['none', 'zlib@openssh.com', 'zlib'],
             },
           };
 
@@ -374,14 +374,39 @@ export async function upload(
     const fileStat = fs.statSync(localPath);
     const total = fileStat.size;
 
+    // Use fastPut for maximum speed when no rate limit is active
+    if (getTransferSpeedLimit() == null) {
+      return new Promise((resolve, reject) => {
+        let aborted = false;
+        const cleanupAbort = bindAbort(signal, () => {
+          aborted = true;
+          reject(createAbortError());
+        });
+        sftp.fastPut(localPath, remotePath, {
+          concurrency: 64,
+          chunkSize: 65536,
+          step: (transferred, _chunk, totalBytes) => {
+            if (aborted) return;
+            onProgress?.(transferred, totalBytes);
+          },
+        }, (err) => {
+          cleanupAbort();
+          if (aborted) return;
+          if (err) return reject(new Error(`Upload failed: ${err.message}`));
+          resolve();
+        });
+      });
+    }
+
+    // Fallback: stream-based with rate limiting and larger buffers
     return new Promise((resolve, reject) => {
       let transferred = 0;
-      const readStream = fs.createReadStream(localPath);
+      const readStream = fs.createReadStream(localPath, { highWaterMark: 256 * 1024 });
       const throttle = createRateLimitedTransform((chunkBytes) => {
         transferred += chunkBytes;
         onProgress?.(transferred, total);
       });
-      const writeStream = sftp.createWriteStream(remotePath);
+      const writeStream = sftp.createWriteStream(remotePath, { highWaterMark: 256 * 1024 } as any);
       const cleanupAbort = bindAbort(signal, () => {
         const abortError = createAbortError();
         readStream.destroy(abortError);
@@ -425,14 +450,39 @@ export async function download(
   fs.mkdirSync(dir, { recursive: true });
 
   return withReconnect(connId, ({ sftp }) => {
+    // Use fastGet for maximum speed when no rate limit is active
+    if (getTransferSpeedLimit() == null) {
+      return new Promise((resolve, reject) => {
+        let aborted = false;
+        const cleanupAbort = bindAbort(signal, () => {
+          aborted = true;
+          reject(createAbortError());
+        });
+        sftp.fastGet(remotePath, localPath, {
+          concurrency: 64,
+          chunkSize: 65536,
+          step: (transferred, _chunk, totalBytes) => {
+            if (aborted) return;
+            onProgress?.(transferred, totalBytes);
+          },
+        }, (err) => {
+          cleanupAbort();
+          if (aborted) return;
+          if (err) return reject(new Error(`Download failed: ${err.message}`));
+          resolve();
+        });
+      });
+    }
+
+    // Fallback: stream-based with rate limiting and larger buffers
     return new Promise((resolve, reject) => {
       let transferred = 0;
-      const readStream = sftp.createReadStream(remotePath);
+      const readStream = sftp.createReadStream(remotePath, { highWaterMark: 256 * 1024 } as any);
       const throttle = createRateLimitedTransform((chunkBytes) => {
         transferred += chunkBytes;
         onProgress?.(transferred, total);
       });
-      const writeStream = fs.createWriteStream(localPath);
+      const writeStream = fs.createWriteStream(localPath, { highWaterMark: 256 * 1024 });
       const cleanupAbort = bindAbort(signal, () => {
         const abortError = createAbortError();
         readStream.destroy(abortError);
