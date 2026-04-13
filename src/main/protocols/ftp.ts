@@ -6,6 +6,18 @@ import type { FTPConfig, FileEntry } from '../../shared/types';
 import { bindAbort, createAbortError, throwIfAborted } from './transfer-abort';
 import { createRateLimitedTransform } from './transfer-rate-limit';
 
+// ── Connection mutex (basic-ftp allows only one command at a time) ──
+
+const connectionMutex = new Map<string, Promise<void>>();
+
+function withMutex<T>(connId: string, fn: () => Promise<T>): Promise<T> {
+  const prev = connectionMutex.get(connId) ?? Promise.resolve();
+  const next = prev.then(fn, fn); // run fn after previous completes (even if it failed)
+  // Store the chain but don't propagate errors to the next waiter
+  connectionMutex.set(connId, next.then(() => {}, () => {}));
+  return next;
+}
+
 // ── Connection pool ────────────────────────────────────────────
 
 interface PooledFTP {
@@ -105,7 +117,11 @@ export async function disconnect(connId: string): Promise<void> {
   }
 }
 
-export async function list(connId: string, dirPath: string): Promise<FileEntry[]> {
+export function list(connId: string, dirPath: string): Promise<FileEntry[]> {
+  return withMutex(connId, () => listImpl(connId, dirPath));
+}
+
+async function listImpl(connId: string, dirPath: string): Promise<FileEntry[]> {
   const conn = getConn(connId);
   const normalizedDirPath = normalizeAbsolutePath(dirPath);
   const entries = await listDirectory(conn, normalizedDirPath);
@@ -133,13 +149,14 @@ export async function list(connId: string, dirPath: string): Promise<FileEntry[]
   return result;
 }
 
-export async function upload(
+export function upload(
   connId: string,
   localPath: string,
   remotePath: string,
   onProgress?: (transferred: number, total: number) => void,
   signal?: AbortSignal,
 ): Promise<void> {
+  return withMutex(connId, async () => {
   throwIfAborted(signal);
   const conn = getConn(connId);
   const remoteServerPath = resolveServerPath(conn, remotePath);
@@ -164,19 +181,21 @@ export async function upload(
     cleanupAbort();
     readStream.destroy();
   }
+  });
 }
 
-export async function download(
+export function download(
   connId: string,
   remotePath: string,
   localPath: string,
   onProgress?: (transferred: number, total: number) => void,
   signal?: AbortSignal,
 ): Promise<void> {
+  return withMutex(connId, async () => {
   throwIfAborted(signal);
   const conn = getConn(connId);
   const remoteServerPath = resolveServerPath(conn, remotePath);
-  const total = (await stat(connId, remotePath)).size;
+  const total = (await statImpl(connId, remotePath)).size;
   let transferred = 0;
   const throttle = createRateLimitedTransform((chunkBytes) => {
     transferred += chunkBytes;
@@ -206,25 +225,33 @@ export async function download(
     cleanupAbort();
     throttle.destroy();
   }
+  });
 }
 
-export async function mkdir(connId: string, dirPath: string): Promise<void> {
-  const conn = getConn(connId);
-  await conn.client.ensureDir(resolveServerPath(conn, dirPath));
-  // ensureDir changes working directory — restore the login directory root
-  await resetWorkingDir(conn);
+export function mkdir(connId: string, dirPath: string): Promise<void> {
+  return withMutex(connId, async () => {
+    const conn = getConn(connId);
+    await conn.client.ensureDir(resolveServerPath(conn, dirPath));
+    await resetWorkingDir(conn);
+  });
 }
 
-export async function rename(
+export function rename(
   connId: string,
   oldPath: string,
   newPath: string,
 ): Promise<void> {
-  const conn = getConn(connId);
-  await conn.client.rename(resolveServerPath(conn, oldPath), resolveServerPath(conn, newPath));
+  return withMutex(connId, async () => {
+    const conn = getConn(connId);
+    await conn.client.rename(resolveServerPath(conn, oldPath), resolveServerPath(conn, newPath));
+  });
 }
 
-export async function stat(connId: string, targetPath: string): Promise<FileEntry> {
+export function stat(connId: string, targetPath: string): Promise<FileEntry> {
+  return withMutex(connId, () => statImpl(connId, targetPath));
+}
+
+async function statImpl(connId: string, targetPath: string): Promise<FileEntry> {
   const normalizedTargetPath = normalizeAbsolutePath(targetPath);
 
   if (normalizedTargetPath === '/') {
@@ -240,7 +267,7 @@ export async function stat(connId: string, targetPath: string): Promise<FileEntr
 
   const parentPath = normalizeAbsolutePath(path.posix.dirname(normalizedTargetPath));
   const baseName = path.posix.basename(normalizedTargetPath);
-  const entries = await list(connId, parentPath);
+  const entries = await listImpl(connId, parentPath);
   const entry = entries.find((candidate) => candidate.name === baseName);
 
   if (!entry) {
@@ -257,26 +284,28 @@ export async function stat(connId: string, targetPath: string): Promise<FileEntr
   };
 }
 
-export async function del(connId: string, targetPath: string): Promise<void> {
-  const conn = getConn(connId);
-  const serverTargetPath = resolveServerPath(conn, targetPath);
+export function del(connId: string, targetPath: string): Promise<void> {
+  return withMutex(connId, async () => {
+    const conn = getConn(connId);
+    const serverTargetPath = resolveServerPath(conn, targetPath);
 
-  // Try to detect if target is a directory by listing it.
-  // If list() succeeds, the path is a directory (listing a file throws).
-  try {
-    await conn.client.list(serverTargetPath);
-    await conn.client.removeDir(serverTargetPath);
-    return;
-  } catch {
-    // list failed — it's a file (or doesn't exist)
-  }
+    // Try to detect if target is a directory by listing it.
+    // If list() succeeds, the path is a directory (listing a file throws).
+    try {
+      await conn.client.list(serverTargetPath);
+      await conn.client.removeDir(serverTargetPath);
+      return;
+    } catch {
+      // list failed — it's a file (or doesn't exist)
+    }
 
-  await conn.client.remove(serverTargetPath);
+    await conn.client.remove(serverTargetPath);
+  });
 }
 
 // ── Transfer Resume ────────────────────────────────────────────
 
-export async function resumeTransfer(
+export function resumeTransfer(
   connId: string,
   direction: 'upload' | 'download',
   localPath: string,
@@ -284,11 +313,13 @@ export async function resumeTransfer(
   onProgress?: (transferred: number, total: number) => void,
   signal?: AbortSignal,
 ): Promise<void> {
-  if (direction === 'upload') {
-    return resumeUpload(connId, localPath, remotePath, onProgress, signal);
-  } else {
-    return resumeDownload(connId, remotePath, localPath, onProgress, signal);
-  }
+  return withMutex(connId, () => {
+    if (direction === 'upload') {
+      return resumeUpload(connId, localPath, remotePath, onProgress, signal);
+    } else {
+      return resumeDownload(connId, remotePath, localPath, onProgress, signal);
+    }
+  });
 }
 
 async function resumeUpload(
