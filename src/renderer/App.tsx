@@ -218,15 +218,17 @@ export default function App() {
       });
     }
 
-    // Remove the active tab
-    setTabs((prev) => prev.filter((t) => t.id !== activeTab.id));
-    setActiveTabId((prevId) => {
-      const remaining = tabs.filter((t) => t.id !== activeTab.id);
-      if (remaining.length === 0) return null;
-      // Select nearest tab
-      const idx = tabs.findIndex((t) => t.id === activeTab.id);
-      const nextIdx = Math.min(idx, remaining.length - 1);
-      return remaining[nextIdx]?.id ?? null;
+    // Remove the active tab (derive next tab from fresh state, not stale closure)
+    setTabs((prev) => {
+      const remaining = prev.filter((t) => t.id !== activeTab.id);
+      if (remaining.length === 0) {
+        setActiveTabId(null);
+      } else {
+        const idx = prev.findIndex((t) => t.id === activeTab.id);
+        const nextIdx = Math.min(idx, remaining.length - 1);
+        setActiveTabId(remaining[nextIdx]?.id ?? null);
+      }
+      return remaining;
     });
   };
 

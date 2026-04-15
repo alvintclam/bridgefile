@@ -353,9 +353,13 @@ export async function download(
           fs.writeSync(fd, data, 0, data.length, start);
         }),
       );
-    } finally {
+    } catch (err) {
       fs.closeSync(fd);
+      // Clean up corrupt partial file
+      try { fs.unlinkSync(localPath); } catch { /* ignore */ }
+      throw err;
     }
+    fs.closeSync(fd);
     return;
   }
 
@@ -595,11 +599,12 @@ export async function uploadDir(
   for (let i = 0; i < allFiles.length; i += DIR_BATCH_SIZE) {
     throwIfAborted(signal);
     const batch = allFiles.slice(i, i + DIR_BATCH_SIZE);
-    await Promise.all(batch.map((f) => {
-      completed += 1;
-      onProgress?.(f.local, completed, allFiles.length);
-      return upload(connId, f.local, f.remote, undefined, signal);
-    }));
+    await Promise.all(batch.map((f) =>
+      upload(connId, f.local, f.remote, undefined, signal).then(() => {
+        completed += 1;
+        onProgress?.(f.local, completed, allFiles.length);
+      }),
+    ));
   }
 }
 
@@ -657,9 +662,10 @@ export async function downloadDir(
       const relativePath = virtualPath.slice(cleanRemoteDir.length + 1);
       const localPath = path.join(localDir, ...relativePath.split('/'));
       fs.mkdirSync(path.dirname(localPath), { recursive: true });
-      completed += 1;
-      onProgress?.(virtualPath, completed, allKeys.length);
-      return download(connId, virtualPath, localPath, undefined, signal);
+      return download(connId, virtualPath, localPath, undefined, signal).then(() => {
+        completed += 1;
+        onProgress?.(virtualPath, completed, allKeys.length);
+      });
     }));
   }
 }

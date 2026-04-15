@@ -14,6 +14,18 @@ import * as store from './store';
 import { checkForUpdates } from './auto-updater';
 import type { FileEntry, TransferItem, TransferQueueState } from '../shared/types';
 
+// ── Path validation (prevent traversal outside user directories) ──
+
+const ALLOWED_ROOTS = [os.homedir(), os.tmpdir(), app.getPath('temp'), app.getPath('downloads')];
+
+function validateLocalPath(targetPath: string): void {
+  const resolved = path.resolve(targetPath);
+  const isAllowed = ALLOWED_ROOTS.some((root) => resolved.startsWith(root));
+  if (!isAllowed) {
+    throw new Error(`Access denied: path "${resolved}" is outside allowed directories`);
+  }
+}
+
 // ── In-memory transfer queue ───────────────────────────────────
 
 const transferQueue: TransferItem[] = [];
@@ -58,6 +70,7 @@ function startTransfer(transfer: TransferItem): void {
   transfer.completedAt = undefined;
 
   let task: Promise<void>;
+  try {
   if (transfer.entryType === 'directory') {
     const onDirectoryProgress = (file: string, fileIndex: number, totalFiles: number) => {
       if (transfer.status === 'cancelled') return;
@@ -111,6 +124,14 @@ function startTransfer(transfer: TransferItem): void {
       default:
         throw new Error(`Unsupported protocol: ${transfer.protocol}`);
     }
+  }
+  } catch (err: unknown) {
+    transfer.status = 'failed';
+    transfer.error = err instanceof Error ? err.message : String(err);
+    runningTransferIds.delete(transfer.id);
+    activeTransferControllers.delete(transfer.id);
+    scheduleTransfers();
+    return;
   }
 
   task
@@ -908,6 +929,7 @@ export function registerIPCHandlers(): void {
   // ── Local filesystem ───────────────────────────────────────
 
   ipcMain.handle('fs:listLocal', async (_event, dirPath: string) => {
+    validateLocalPath(dirPath);
     const entries = fs.readdirSync(dirPath, { withFileTypes: true });
     const result: FileEntry[] = [];
 
@@ -937,26 +959,33 @@ export function registerIPCHandlers(): void {
   });
 
   ipcMain.handle('fs:mkdir', async (_event, dirPath: string) => {
+    validateLocalPath(dirPath);
     fs.mkdirSync(dirPath, { recursive: true });
   });
 
   ipcMain.handle('fs:rename', async (_event, oldPath: string, newPath: string) => {
+    validateLocalPath(oldPath);
+    validateLocalPath(newPath);
     fs.renameSync(oldPath, newPath);
   });
 
   ipcMain.handle('fs:delete', async (_event, targetPath: string) => {
+    validateLocalPath(targetPath);
     fs.rmSync(targetPath, { recursive: true, force: false });
   });
 
   ipcMain.handle('fs:readTextFile', async (_event, filePath: string) => {
+    validateLocalPath(filePath);
     return fs.readFileSync(filePath, 'utf-8');
   });
 
   ipcMain.handle('fs:writeTextFile', async (_event, filePath: string, content: string) => {
+    validateLocalPath(filePath);
     fs.writeFileSync(filePath, content, 'utf-8');
   });
 
   ipcMain.handle('fs:stat', async (_event, targetPath: string) => {
+    validateLocalPath(targetPath);
     return statLocalEntry(targetPath);
   });
 
@@ -1016,7 +1045,7 @@ export function registerIPCHandlers(): void {
       fs.mkdirSync(tmpDir, { recursive: true });
 
       const fileName = path.basename(remotePath);
-      const tmpPath = path.join(tmpDir, `${Date.now()}-${fileName}`);
+      const tmpPath = path.join(tmpDir, `${crypto.randomUUID()}-${fileName}`);
 
       await downloadRemoteToTemp(protocol as 'sftp' | 's3' | 'ftp', connId, remotePath, tmpPath);
 
@@ -1031,7 +1060,7 @@ export function registerIPCHandlers(): void {
       fs.mkdirSync(tmpDir, { recursive: true });
 
       const fileName = path.basename(remotePath);
-      const tmpPath = path.join(tmpDir, `${Date.now()}-${fileName}`);
+      const tmpPath = path.join(tmpDir, `${crypto.randomUUID()}-${fileName}`);
       fs.writeFileSync(tmpPath, content, 'utf-8');
 
       if (protocol === 'sftp') {

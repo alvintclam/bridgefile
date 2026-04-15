@@ -16,6 +16,7 @@ interface PooledConnection {
   config: SFTPConfig;
   lastActivity: number;
   extraChannels?: SFTPWrapper[];
+  proxyClient?: Client;
 }
 
 const pool = new Map<string, PooledConnection>();
@@ -28,6 +29,9 @@ setInterval(() => {
   for (const [id, conn] of pool) {
     if (now - conn.lastActivity > IDLE_TIMEOUT_MS) {
       conn.client.end();
+      if (conn.proxyClient) {
+        try { conn.proxyClient.end(); } catch { /* ignore */ }
+      }
       pool.delete(id);
     }
   }
@@ -114,16 +118,18 @@ function downloadRange(
   });
 }
 
-function mergeChunks(chunkPaths: string[], destPath: string): void {
+async function mergeChunks(chunkPaths: string[], destPath: string): Promise<void> {
   const writeStream = fs.createWriteStream(destPath, { highWaterMark: 256 * 1024 });
   for (const chunk of chunkPaths) {
     const data = fs.readFileSync(chunk);
     writeStream.write(data);
-    fs.unlinkSync(chunk);
+    try { fs.unlinkSync(chunk); } catch { /* ignore */ }
   }
-  writeStream.end();
-  // Wait for write to finish synchronously
-  fs.closeSync(fs.openSync(destPath, 'r'));
+  return new Promise((resolve, reject) => {
+    writeStream.on('close', () => resolve());
+    writeStream.on('error', (err) => reject(new Error(`Merge failed: ${err.message}`)));
+    writeStream.end();
+  });
 }
 
 function expandHomePath(filePath: string): string {
@@ -377,11 +383,7 @@ async function connectViaProxy(id: string, config: SFTPConfig): Promise<string> 
                 sftp,
                 config,
                 lastActivity: Date.now(),
-              });
-
-              // Clean up proxy when target disconnects
-              targetClient.on('close', () => {
-                proxyClient.end();
+                proxyClient,
               });
 
               resolve(id);
@@ -755,11 +757,12 @@ export async function uploadDir(
   for (let i = 0; i < allFiles.length; i += DIR_BATCH_SIZE) {
     throwIfAborted(signal);
     const batch = allFiles.slice(i, i + DIR_BATCH_SIZE);
-    await Promise.all(batch.map((f) => {
-      completed += 1;
-      onProgress?.(f.local, completed, allFiles.length);
-      return upload(connId, f.local, f.remote, undefined, signal);
-    }));
+    await Promise.all(batch.map((f) =>
+      upload(connId, f.local, f.remote, undefined, signal).then(() => {
+        completed += 1;
+        onProgress?.(f.local, completed, allFiles.length);
+      }),
+    ));
   }
 }
 
@@ -800,17 +803,16 @@ export async function downloadDir(
   for (let i = 0; i < allFiles.length; i += DIR_BATCH_SIZE) {
     throwIfAborted(signal);
     const batch = allFiles.slice(i, i + DIR_BATCH_SIZE);
-    await Promise.all(batch.map((f) => {
-      completed += 1;
-      onProgress?.(f.remote, completed, allFiles.length);
-      return download(connId, f.remote, f.local, undefined, signal);
-    }));
+    await Promise.all(batch.map((f) =>
+      download(connId, f.remote, f.local, undefined, signal).then(() => {
+        completed += 1;
+        onProgress?.(f.remote, completed, allFiles.length);
+      }),
+    ));
   }
 }
 
 export async function deleteDir(connId: string, dirPath: string): Promise<void> {
-  const { sftp } = getConn(connId);
-
   const entries = await list(connId, dirPath);
 
   for (const entry of entries) {
@@ -818,20 +820,24 @@ export async function deleteDir(connId: string, dirPath: string): Promise<void> 
     if (entry.isDirectory) {
       await deleteDir(connId, fullPath);
     } else {
-      await new Promise<void>((resolve, reject) => {
-        sftp.unlink(fullPath, (err) => {
-          if (err) return reject(new Error(`unlink failed: ${err.message}`));
-          resolve();
+      await withReconnect(connId, ({ sftp }) => {
+        return new Promise<void>((resolve, reject) => {
+          sftp.unlink(fullPath, (err) => {
+            if (err) return reject(new Error(`unlink failed: ${err.message}`));
+            resolve();
+          });
         });
       });
     }
   }
 
   // Remove the now-empty directory
-  await new Promise<void>((resolve, reject) => {
-    sftp.rmdir(dirPath, (err) => {
-      if (err) return reject(new Error(`rmdir failed: ${err.message}`));
-      resolve();
+  await withReconnect(connId, ({ sftp }) => {
+    return new Promise<void>((resolve, reject) => {
+      sftp.rmdir(dirPath, (err) => {
+        if (err) return reject(new Error(`rmdir failed: ${err.message}`));
+        resolve();
+      });
     });
   });
 }

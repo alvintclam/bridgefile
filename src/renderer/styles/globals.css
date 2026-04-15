@@ -17,6 +17,48 @@
   --color-info: #71717a;
 }
 
+/* Light theme overrides — remap dark hardcoded colors */
+.light-theme {
+  --color-bg: #f5f5f7;
+  --color-surface: #ffffff;
+  --color-surface-hover: #f0f0f2;
+  --color-border: #d1d5db;
+  --color-border-light: #e5e7eb;
+  --color-text-primary: #1a1a2e;
+  --color-text-secondary: #4b5563;
+  --color-text-muted: #6b7280;
+}
+
+/* Override hardcoded Tailwind bg colors in light theme */
+.light-theme .bg-\[\#0a0a0f\] { background-color: #f5f5f7 !important; }
+.light-theme .bg-\[\#12121a\] { background-color: #ffffff !important; }
+.light-theme .bg-\[\#1a1a26\] { background-color: #f0f0f2 !important; }
+.light-theme .bg-\[\#1e1e2e\] { background-color: #e5e7eb !important; }
+
+/* Override hardcoded text colors */
+.light-theme .text-\[\#e4e4e7\] { color: #1a1a2e !important; }
+.light-theme .text-\[\#a1a1aa\] { color: #4b5563 !important; }
+.light-theme .text-\[\#71717a\] { color: #6b7280 !important; }
+.light-theme .text-\[\#52525b\] { color: #9ca3af !important; }
+
+/* Override hardcoded border colors */
+.light-theme .border-\[\#1e1e2e\] { border-color: #d1d5db !important; }
+.light-theme .border-\[\#2a2a3e\] { border-color: #e5e7eb !important; }
+
+/* Override surface patterns */
+.light-theme .hover\:bg-\[\#1a1a26\]:hover { background-color: #e5e7eb !important; }
+.light-theme .hover\:bg-\[\#3b82f6\]\/15:hover { background-color: rgba(59, 130, 246, 0.1) !important; }
+
+/* Scrollbar for light theme */
+.light-theme ::-webkit-scrollbar-thumb { background: #c1c1c8; }
+.light-theme ::-webkit-scrollbar-thumb:hover { background: #a1a1a8; }
+
+/* Selection for light theme */
+.light-theme ::selection { color: #1a1a2e; }
+
+/* Light theme index.html body background */
+.light-theme { background-color: #f5f5f7 !important; color: #1a1a2e !important; }
+
 @layer base {
   * {
     box-sizing: border-box;

@@ -1,4 +1,4 @@
-import React, { useState, useEffect, useCallback } from 'react';
+import React, { useState, useEffect, useCallback, useRef } from 'react';
 
 // ── Types ──────────────────────────────────────────────────────
 
@@ -193,13 +193,10 @@ export default function FileEditor({
               {error}
             </div>
           ) : (
-            <textarea
-              value={content}
-              onChange={(e) => setContent(e.target.value)}
+            <LineNumberedEditor
+              content={content}
+              onChange={setContent}
               onKeyDown={handleKeyDown}
-              className="w-full h-full resize-none bg-[#0a0a0f] text-[#e4e4e7] font-mono text-xs leading-5 p-3 focus:outline-none border-none"
-              spellCheck={false}
-              wrap="off"
             />
           )}
         </div>
@@ -233,6 +230,53 @@ export default function FileEditor({
           </div>
         </div>
       </div>
+    </div>
+  );
+}
+
+// ── Line-numbered editor ──────────────────────────────────────
+
+function LineNumberedEditor({
+  content,
+  onChange,
+  onKeyDown,
+}: {
+  content: string;
+  onChange: (value: string) => void;
+  onKeyDown: (e: React.KeyboardEvent) => void;
+}) {
+  const textareaRef = useRef<HTMLTextAreaElement>(null);
+  const lineNumberRef = useRef<HTMLDivElement>(null);
+  const lineCount = content.split('\n').length;
+  const gutterWidth = Math.max(3, String(lineCount).length) * 9 + 16;
+
+  const handleScroll = () => {
+    if (textareaRef.current && lineNumberRef.current) {
+      lineNumberRef.current.scrollTop = textareaRef.current.scrollTop;
+    }
+  };
+
+  return (
+    <div className="flex h-full overflow-hidden">
+      <div
+        ref={lineNumberRef}
+        className="shrink-0 bg-[#0a0a0f] text-[#52525b] font-mono text-xs leading-5 pt-3 pb-3 text-right overflow-hidden select-none border-r border-[#1e1e2e]"
+        style={{ width: gutterWidth }}
+      >
+        {Array.from({ length: lineCount }, (_, i) => (
+          <div key={i} className="pr-2 pl-2">{i + 1}</div>
+        ))}
+      </div>
+      <textarea
+        ref={textareaRef}
+        value={content}
+        onChange={(e) => onChange(e.target.value)}
+        onKeyDown={onKeyDown}
+        onScroll={handleScroll}
+        className="flex-1 h-full resize-none bg-[#0a0a0f] text-[#e4e4e7] font-mono text-xs leading-5 p-3 focus:outline-none border-none"
+        spellCheck={false}
+        wrap="off"
+      />
     </div>
   );
 }

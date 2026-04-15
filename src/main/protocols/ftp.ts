@@ -191,7 +191,16 @@ export function download(
   onProgress?: (transferred: number, total: number) => void,
   signal?: AbortSignal,
 ): Promise<void> {
-  return withMutex(connId, async () => {
+  return withMutex(connId, () => downloadImpl(connId, remotePath, localPath, onProgress, signal));
+}
+
+async function downloadImpl(
+  connId: string,
+  remotePath: string,
+  localPath: string,
+  onProgress?: (transferred: number, total: number) => void,
+  signal?: AbortSignal,
+): Promise<void> {
   throwIfAborted(signal);
   const conn = getConn(connId);
   const remoteServerPath = resolveServerPath(conn, remotePath);
@@ -225,7 +234,6 @@ export function download(
     cleanupAbort();
     throttle.destroy();
   }
-  });
 }
 
 export function mkdir(connId: string, dirPath: string): Promise<void> {
@@ -389,8 +397,8 @@ async function resumeDownload(
   try {
     total = await conn.client.size(remoteServerPath);
   } catch {
-    // Fall back to non-resume download
-    return download(connId, remotePath, localPath, onProgress, signal);
+    // Fall back to non-resume download (use impl to avoid mutex deadlock)
+    return downloadImpl(connId, remotePath, localPath, onProgress, signal);
   }
 
   // Check local file size for resume
