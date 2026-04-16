@@ -8,7 +8,10 @@
   "include": [
     "src/test/**/*.ts",
     "src/main/protocols/**/*.ts",
-    "src/shared/**/*.ts"
+    "src/shared/**/*.ts",
+    "src/cli/url-parser.ts",
+    "src/renderer/lib/highlight.ts",
+    "src/renderer/lib/profile-io.ts"
   ],
   "exclude": [
     "node_modules",

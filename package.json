@@ -14,7 +14,7 @@
     "build:cli": "tsc -p tsconfig.cli.json",
     "build": "npm run build:main && npm run build:preload && npm run build:renderer",
     "cli": "node dist/cli/cli.js",
-    "test": "tsc -p tsconfig.test.json && node --test dist-test/test/transfer-scheduler.test.js dist-test/test/transfer-rate-limit.test.js dist-test/test/connection-profile-ui.test.js",
+    "test": "tsc -p tsconfig.test.json && node --test dist-test/test/transfer-scheduler.test.js dist-test/test/transfer-rate-limit.test.js dist-test/test/connection-profile-ui.test.js dist-test/test/highlight.test.js dist-test/test/profile-io.test.js dist-test/test/cli-url-parser.test.js",
     "pack": "npm run build && electron-builder --dir",
     "dist": "npm run build && electron-builder",
     "dist:win": "npm run build && electron-builder --win",

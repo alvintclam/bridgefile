@@ -1148,8 +1148,20 @@ export default function FilePane({
       {/* Status bar */}
       <div className="flex items-center justify-between px-2 py-1 text-[11px] text-[#71717a] border-t border-[#1e1e2e] bg-[#12121a]">
         <span>
-          {sortedFiles.length} item{sortedFiles.length !== 1 ? 's' : ''}
-          {selected.size > 0 && ` \u00b7 ${selected.size} selected`}
+          {(() => {
+            const totalSize = sortedFiles.reduce((acc, f) => acc + (f.isDirectory ? 0 : f.size), 0);
+            const selSize = sortedFiles
+              .filter((f) => selected.has(f.name))
+              .reduce((acc, f) => acc + (f.isDirectory ? 0 : f.size), 0);
+            const parts = [
+              `${sortedFiles.length} item${sortedFiles.length !== 1 ? 's' : ''}`,
+              totalSize > 0 ? formatFileSize(totalSize) : null,
+            ].filter(Boolean);
+            if (selected.size > 0) {
+              parts.push(`${selected.size} selected${selSize > 0 ? ` (${formatFileSize(selSize)})` : ''}`);
+            }
+            return parts.join(' · ');
+          })()}
         </span>
         <span className="font-mono text-[10px]">{currentPath}</span>
       </div>

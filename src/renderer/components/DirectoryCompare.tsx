@@ -159,6 +159,9 @@ export default function DirectoryCompare({
     }
   }, [isOpen, compare]);
 
+  // Conflict resolution for `different` files: keep newer by default
+  const [conflictMode, setConflictMode] = useState<'newer' | 'local' | 'remote' | 'skip'>('newer');
+
   const handleSync = useCallback(
     async (mode: 'upload-missing' | 'download-missing' | 'sync-both') => {
       if (!isElectron() || !protocol || !connectionId) return;
@@ -171,19 +174,29 @@ export default function DirectoryCompare({
           : protocol === 's3' ? window.bridgefile.s3
           : window.bridgefile.ftp;
 
+        const lpJoin = (name: string) => (localPath.endsWith('/') ? localPath + name : localPath + '/' + name);
+        const rpJoin = (name: string) => (remotePath.endsWith('/') ? remotePath + name : remotePath + '/' + name);
+
         for (const entry of entries) {
           if (mode === 'upload-missing' || mode === 'sync-both') {
             if (entry.status === 'only-local') {
-              const lp = localPath.endsWith('/') ? localPath + entry.name : localPath + '/' + entry.name;
-              const rp = remotePath.endsWith('/') ? remotePath + entry.name : remotePath + '/' + entry.name;
-              await api.upload(connectionId, lp, rp);
+              await api.upload(connectionId, lpJoin(entry.name), rpJoin(entry.name));
             }
           }
           if (mode === 'download-missing' || mode === 'sync-both') {
             if (entry.status === 'only-remote') {
-              const rp = remotePath.endsWith('/') ? remotePath + entry.name : remotePath + '/' + entry.name;
-              const lp = localPath.endsWith('/') ? localPath + entry.name : localPath + '/' + entry.name;
-              await api.download(connectionId, rp, lp);
+              await api.download(connectionId, rpJoin(entry.name), lpJoin(entry.name));
+            }
+          }
+          // Handle `different` files in sync-both mode based on conflictMode
+          if (mode === 'sync-both' && entry.status === 'different' && conflictMode !== 'skip') {
+            const preferLocal =
+              conflictMode === 'local' ||
+              (conflictMode === 'newer' && (entry.localDate ?? 0) >= (entry.remoteDate ?? 0));
+            if (preferLocal) {
+              await api.upload(connectionId, lpJoin(entry.name), rpJoin(entry.name));
+            } else {
+              await api.download(connectionId, rpJoin(entry.name), lpJoin(entry.name));
             }
           }
         }
@@ -197,7 +210,31 @@ export default function DirectoryCompare({
         setSyncing(false);
       }
     },
-    [entries, localPath, remotePath, protocol, connectionId, compare],
+    [entries, localPath, remotePath, protocol, connectionId, compare, conflictMode],
+  );
+
+  // Manual per-row actions (used by buttons in the table)
+  const handleRowAction = useCallback(
+    async (entry: CompareEntry, action: 'upload' | 'download' | 'skip') => {
+      if (action === 'skip' || !isElectron() || !protocol || !connectionId) return;
+      setSyncing(true);
+      setError(null);
+      try {
+        const api = protocol === 'sftp' ? window.bridgefile.sftp
+          : protocol === 's3' ? window.bridgefile.s3
+          : window.bridgefile.ftp;
+        const lp = localPath.endsWith('/') ? localPath + entry.name : localPath + '/' + entry.name;
+        const rp = remotePath.endsWith('/') ? remotePath + entry.name : remotePath + '/' + entry.name;
+        if (action === 'upload') await api.upload(connectionId, lp, rp);
+        else await api.download(connectionId, rp, lp);
+        await compare();
+      } catch (err: unknown) {
+        setError(err instanceof Error ? err.message : String(err));
+      } finally {
+        setSyncing(false);
+      }
+    },
+    [localPath, remotePath, protocol, connectionId, compare],
   );
 
   if (!isOpen) return null;
@@ -240,15 +277,31 @@ export default function DirectoryCompare({
             <span className="text-amber-400">{counts.different} different</span>
             <span className="text-[#71717a]">{counts.same} same</span>
           </div>
-          <label className="flex items-center gap-1.5 text-[10px] text-[#a1a1aa] cursor-pointer">
-            <input
-              type="checkbox"
-              checked={hideIdentical}
-              onChange={(e) => setHideIdentical(e.target.checked)}
-              className="rounded border-[#1e1e2e]"
-            />
-            Hide identical
-          </label>
+          <div className="flex items-center gap-3">
+            <label className="flex items-center gap-1.5 text-[10px] text-[#a1a1aa]">
+              <span>Conflicts:</span>
+              <select
+                value={conflictMode}
+                onChange={(e) => setConflictMode(e.target.value as typeof conflictMode)}
+                className="bg-[#0a0a0f] border border-[#1e1e2e] rounded px-1.5 py-0.5 text-[10px] text-[#e4e4e7] focus:outline-none focus:border-[#3b82f6]"
+                aria-label="Conflict resolution for different files"
+              >
+                <option value="newer">Prefer newer</option>
+                <option value="local">Prefer local</option>
+                <option value="remote">Prefer remote</option>
+                <option value="skip">Skip differing</option>
+              </select>
+            </label>
+            <label className="flex items-center gap-1.5 text-[10px] text-[#a1a1aa] cursor-pointer">
+              <input
+                type="checkbox"
+                checked={hideIdentical}
+                onChange={(e) => setHideIdentical(e.target.checked)}
+                className="rounded border-[#1e1e2e]"
+              />
+              Hide identical
+            </label>
+          </div>
         </div>
 
         {/* Table */}
@@ -275,6 +328,7 @@ export default function DirectoryCompare({
                   <th className="text-right py-1.5 px-2 font-medium">Local Date</th>
                   <th className="text-right py-1.5 px-2 font-medium">Remote Date</th>
                   <th className="text-center py-1.5 px-2 font-medium">Status</th>
+                  <th className="text-center py-1.5 px-2 font-medium">Actions</th>
                 </tr>
               </thead>
               <tbody>
@@ -299,6 +353,38 @@ export default function DirectoryCompare({
                         <span className={`px-1.5 py-0.5 rounded text-[9px] font-medium ${style.bg} ${style.text}`}>
                           {style.label}
                         </span>
+                      </td>
+                      <td className="py-1 px-2 text-center">
+                        {entry.status !== 'same' && (
+                          <div className="flex items-center justify-center gap-1">
+                            {entry.status !== 'only-remote' && (
+                              <button
+                                onClick={() => handleRowAction(entry, 'upload')}
+                                disabled={syncing}
+                                className="p-0.5 rounded text-emerald-400 hover:bg-emerald-500/10 disabled:opacity-30"
+                                title="Upload (overwrite remote)"
+                                aria-label={`Upload ${entry.name}`}
+                              >
+                                <svg width="11" height="11" viewBox="0 0 24 24" fill="none">
+                                  <path d="M12 19V5M5 12l7-7 7 7" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" />
+                                </svg>
+                              </button>
+                            )}
+                            {entry.status !== 'only-local' && (
+                              <button
+                                onClick={() => handleRowAction(entry, 'download')}
+                                disabled={syncing}
+                                className="p-0.5 rounded text-blue-400 hover:bg-blue-500/10 disabled:opacity-30"
+                                title="Download (overwrite local)"
+                                aria-label={`Download ${entry.name}`}
+                              >
+                                <svg width="11" height="11" viewBox="0 0 24 24" fill="none">
+                                  <path d="M12 5v14M19 12l-7 7-7-7" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" />
+                                </svg>
+                              </button>
+                            )}
+                          </div>
+                        )}
                       </td>
                     </tr>
                   );

@@ -250,6 +250,65 @@ export default function ConnectionManager({
     }
   };
 
+  // Test connection without saving/persisting
+  const [testResult, setTestResult] = useState<{ ok: boolean; message: string } | null>(null);
+  const [testing, setTesting] = useState(false);
+
+  const handleTest = async () => {
+    if (!isElectron()) {
+      setTestResult({ ok: false, message: 'Desktop app required' });
+      return;
+    }
+    const profile = selectedProfile || ({
+      ...formData,
+      id: 'test-' + Date.now().toString(),
+      type: activeTab,
+      favorite: false,
+    } as ConnectionProfile);
+
+    setTesting(true);
+    setTestResult(null);
+    let connId: string | null = null;
+    try {
+      if (profile.type === 'SFTP') {
+        connId = await window.bridgefile.sftp.connect(toSftpConnectConfig(profile));
+        await window.bridgefile.sftp.list(connId, '/');
+      } else if (profile.type === 'FTP') {
+        connId = await window.bridgefile.ftp.connect({
+          host: profile.host || '',
+          port: profile.port || 21,
+          username: profile.username || '',
+          password: profile.password || '',
+          secure: profile.secure || false,
+          timeout: profile.timeout ?? 30,
+        });
+        await window.bridgefile.ftp.list(connId, '/');
+      } else {
+        connId = await window.bridgefile.s3.connect({
+          accessKeyId: profile.accessKey || '',
+          secretAccessKey: profile.secretKey || '',
+          region: profile.region || 'us-east-1',
+          bucket: profile.bucket || '',
+          prefix: profile.prefix,
+          endpoint: profile.endpoint,
+          timeout: profile.timeout ?? 30,
+        });
+        await window.bridgefile.s3.list(connId, '/');
+      }
+      setTestResult({ ok: true, message: 'Connection successful' });
+    } catch (err: unknown) {
+      const msg = err instanceof Error ? err.message : String(err);
+      setTestResult({ ok: false, message: msg });
+    } finally {
+      // Clean up test connection
+      if (connId) {
+        const proto = profile.type.toLowerCase() as 'sftp' | 'ftp' | 's3';
+        window.bridgefile[proto].disconnect(connId).catch(() => {});
+      }
+      setTesting(false);
+    }
+  };
+
   const toggleFavorite = (id: string) => {
     const profile = profiles.find((entry) => entry.id === id);
     if (!profile) return;
@@ -1055,11 +1114,29 @@ export default function ConnectionManager({
               )}
             </div>
             <div className="flex items-center gap-2">
+              {testResult && (
+                <span
+                  className={`text-[11px] font-medium mr-1 ${testResult.ok ? 'text-emerald-400' : 'text-red-400'}`}
+                  role="status"
+                >
+                  {testResult.ok ? '✓' : '✗'} {testResult.message.slice(0, 60)}
+                </span>
+              )}
               <button
                 onClick={onClose}
                 className="px-3 py-1.5 text-xs rounded text-[#a1a1aa] hover:bg-[#1a1a26] border border-[#1e1e2e] transition-colors"
               >
                 {t('cancel')}
+              </button>
+              <button
+                onClick={handleTest}
+                disabled={testing}
+                className={`px-3 py-1.5 text-xs rounded text-[#a1a1aa] hover:bg-[#1a1a26] border border-[#1e1e2e] transition-colors ${
+                  testing ? 'cursor-wait opacity-60' : ''
+                }`}
+                title="Test connection without saving"
+              >
+                {testing ? 'Testing…' : 'Test'}
               </button>
               <button
                 onClick={handleSave}
