@@ -120,10 +120,20 @@ function downloadRange(
 
 async function mergeChunks(chunkPaths: string[], destPath: string): Promise<void> {
   const writeStream = fs.createWriteStream(destPath, { highWaterMark: 256 * 1024 });
-  for (const chunk of chunkPaths) {
-    const data = fs.readFileSync(chunk);
-    writeStream.write(data);
-    try { fs.unlinkSync(chunk); } catch { /* ignore */ }
+  try {
+    for (const chunk of chunkPaths) {
+      // Stream each chunk instead of readFileSync to avoid RAM spikes on large files
+      await new Promise<void>((resolve, reject) => {
+        const readStream = fs.createReadStream(chunk, { highWaterMark: 256 * 1024 });
+        readStream.on('error', reject);
+        readStream.on('end', () => resolve());
+        readStream.pipe(writeStream, { end: false });
+      });
+      try { fs.unlinkSync(chunk); } catch { /* ignore */ }
+    }
+  } catch (err) {
+    writeStream.destroy();
+    throw err;
   }
   return new Promise((resolve, reject) => {
     writeStream.on('close', () => resolve());
@@ -535,6 +545,7 @@ export async function download(
 
   // Multi-channel parallel download for large files (>10MB, no rate limit)
   if (total > PARALLEL_THRESHOLD && getTransferSpeedLimit() == null) {
+    const chunkPaths: string[] = [];
     try {
       const channels = await getSftpChannels(connId, PARALLEL_CHANNELS);
       const chunkSize = Math.ceil(total / channels.length);
@@ -542,7 +553,6 @@ export async function download(
       fs.mkdirSync(tmpDir, { recursive: true });
 
       let totalTransferred = 0;
-      const chunkPaths: string[] = [];
 
       await Promise.all(channels.map((ch, i) => {
         const start = i * chunkSize;
@@ -557,9 +567,14 @@ export async function download(
       }));
 
       // Merge chunks into final file
-      mergeChunks(chunkPaths, localPath);
+      await mergeChunks(chunkPaths, localPath);
       return;
     } catch (err) {
+      // Clean up any stray chunks and partial output before falling back
+      for (const tmpPath of chunkPaths) {
+        try { fs.unlinkSync(tmpPath); } catch { /* ignore */ }
+      }
+      try { fs.unlinkSync(localPath); } catch { /* ignore */ }
       // If multi-channel fails, fall through to single-channel
       if (err instanceof Error && err.message.includes('abort')) throw err;
       // Clean up any partial temp files silently

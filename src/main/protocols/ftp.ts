@@ -488,8 +488,8 @@ export async function uploadDir(
   for (let i = 0; i < allFiles.length; i += 1) {
     throwIfAborted(signal);
     const file = allFiles[i];
-    onProgress?.(file.local, i + 1, allFiles.length);
     await upload(connId, file.local, file.remote, undefined, signal);
+    onProgress?.(file.local, i + 1, allFiles.length);
   }
 }
 
@@ -524,8 +524,8 @@ export async function downloadDir(
   for (let i = 0; i < allFiles.length; i += 1) {
     throwIfAborted(signal);
     const file = allFiles[i];
-    onProgress?.(file.remote, i + 1, allFiles.length);
     await download(connId, file.remote, file.local, undefined, signal);
+    onProgress?.(file.remote, i + 1, allFiles.length);
   }
 }
 
