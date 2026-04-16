@@ -751,7 +751,8 @@ export default function FilePane({
         <button
           onClick={refresh}
           className="p-1 rounded text-[#71717a] hover:text-[#a1a1aa] hover:bg-[#1a1a26] transition-colors shrink-0"
-          title="Refresh"
+          title="Refresh (F5)"
+          aria-label="Refresh directory"
         >
           <svg width="13" height="13" viewBox="0 0 24 24" fill="none">
             <path
@@ -777,7 +778,8 @@ export default function FilePane({
         <button
           onClick={handleGoUp}
           className="p-0.5 rounded text-[#71717a] hover:text-[#a1a1aa] hover:bg-[#1a1a26] transition-colors shrink-0"
-          title="Go up"
+          title="Go up (Backspace)"
+          aria-label="Go to parent directory"
         >
           <svg width="14" height="14" viewBox="0 0 24 24" fill="none">
             <path d="M15 18l-6-6 6-6" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" />

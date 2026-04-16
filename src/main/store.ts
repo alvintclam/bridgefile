@@ -371,3 +371,80 @@ export async function deleteProfile(id: string): Promise<boolean> {
 
   return true;
 }
+
+// ── Transfer history (append-only log) ─────────────────────────
+
+export interface HistoryEntry {
+  id: string;
+  timestamp: number;
+  protocol: 'sftp' | 's3' | 'ftp';
+  direction: 'upload' | 'download';
+  connectionId: string;
+  connectionName?: string;
+  localPath: string;
+  remotePath: string;
+  fileName: string;
+  size: number;
+  entryType: 'file' | 'directory';
+  status: 'completed' | 'failed' | 'cancelled';
+  error?: string;
+  durationMs?: number;
+}
+
+const MAX_HISTORY_ENTRIES = 5000;
+
+function getHistoryPath(): string {
+  return path.join(app.getPath('userData'), 'history.jsonl');
+}
+
+export function appendHistory(entry: HistoryEntry): void {
+  try {
+    fs.appendFileSync(getHistoryPath(), JSON.stringify(entry) + '\n');
+  } catch {
+    // best-effort; don't fail transfers because of history write
+  }
+}
+
+export function readHistory(limit: number = 500): HistoryEntry[] {
+  const filePath = getHistoryPath();
+  try {
+    if (!fs.existsSync(filePath)) return [];
+    const raw = fs.readFileSync(filePath, 'utf-8');
+    const lines = raw.split('\n').filter((l) => l.trim());
+    const entries: HistoryEntry[] = [];
+    // Read newest first (tail)
+    for (let i = lines.length - 1; i >= 0 && entries.length < limit; i--) {
+      try {
+        entries.push(JSON.parse(lines[i]));
+      } catch {
+        // skip malformed lines
+      }
+    }
+    return entries;
+  } catch {
+    return [];
+  }
+}
+
+export function clearHistory(): void {
+  try {
+    fs.unlinkSync(getHistoryPath());
+  } catch {
+    // nothing to delete
+  }
+}
+
+/** Trim oldest entries when the log exceeds MAX_HISTORY_ENTRIES (called periodically) */
+export function pruneHistory(): void {
+  const filePath = getHistoryPath();
+  try {
+    if (!fs.existsSync(filePath)) return;
+    const raw = fs.readFileSync(filePath, 'utf-8');
+    const lines = raw.split('\n').filter((l) => l.trim());
+    if (lines.length <= MAX_HISTORY_ENTRIES) return;
+    const trimmed = lines.slice(lines.length - MAX_HISTORY_ENTRIES).join('\n') + '\n';
+    fs.writeFileSync(filePath, trimmed);
+  } catch {
+    // best-effort
+  }
+}

@@ -98,9 +98,35 @@ export interface BridgeFileAPI {
     delete(id: string): Promise<boolean>;
   };
 
+  history: {
+    list(limit?: number): Promise<Array<{
+      id: string;
+      timestamp: number;
+      protocol: 'sftp' | 's3' | 'ftp';
+      direction: 'upload' | 'download';
+      connectionId: string;
+      connectionName?: string;
+      localPath: string;
+      remotePath: string;
+      fileName: string;
+      size: number;
+      entryType: 'file' | 'directory';
+      status: 'completed' | 'failed' | 'cancelled';
+      error?: string;
+      durationMs?: number;
+    }>>;
+    clear(): Promise<boolean>;
+  };
+
   app: {
     getVersion(): Promise<string>;
     getPlatform(): Promise<string>;
+    generateSSHKey(options: { type?: 'ed25519' | 'rsa'; bits?: number; passphrase?: string; path?: string }): Promise<{
+      privateKeyPath: string;
+      publicKeyPath: string;
+      publicKeyOpenSSH: string;
+      privateKeyPEM: string;
+    }>;
     editRemoteFile(protocol: string, connId: string, remotePath: string): Promise<string>;
     saveRemoteFile(protocol: string, connId: string, remotePath: string, content: string): Promise<void>;
     computeRemoteChecksum(

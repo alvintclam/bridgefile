@@ -139,9 +139,17 @@ const api = {
     delete: (id: string) => ipcRenderer.invoke('bookmarks:delete', id),
   },
 
+  // ── Transfer history ───────────────────────────────────────
+  history: {
+    list: (limit?: number) => ipcRenderer.invoke('history:list', limit),
+    clear: () => ipcRenderer.invoke('history:clear'),
+  },
+
   // ── App info ───────────────────────────────────────────────
   app: {
     getVersion: () => ipcRenderer.invoke('app:getVersion'),
+    generateSSHKey: (options: { type?: 'ed25519' | 'rsa'; bits?: number; passphrase?: string; path?: string }) =>
+      ipcRenderer.invoke('app:generateSSHKey', options),
     getPlatform: () => ipcRenderer.invoke('app:getPlatform'),
     editRemoteFile: (protocol: string, connId: string, remotePath: string) =>
       ipcRenderer.invoke('app:editRemoteFile', protocol, connId, remotePath),

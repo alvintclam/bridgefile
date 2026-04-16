@@ -14,6 +14,39 @@ import * as store from './store';
 import { checkForUpdates } from './auto-updater';
 import type { FileEntry, TransferItem, TransferQueueState } from '../shared/types';
 
+// ── SSH public key → OpenSSH format ───────────────────────────
+
+function toOpenSSHFormat(publicKey: crypto.KeyObject, type: 'ed25519' | 'rsa'): string {
+  // Use the jwk export to grab raw key material, then re-encode as SSH wire format
+  const jwk = publicKey.export({ format: 'jwk' }) as any;
+
+  function lenPrefix(buf: Buffer): Buffer {
+    const len = Buffer.alloc(4);
+    len.writeUInt32BE(buf.length, 0);
+    return Buffer.concat([len, buf]);
+  }
+
+  if (type === 'ed25519') {
+    const pub = Buffer.from(jwk.x, 'base64url');
+    const blob = Buffer.concat([
+      lenPrefix(Buffer.from('ssh-ed25519')),
+      lenPrefix(pub),
+    ]);
+    return `ssh-ed25519 ${blob.toString('base64')} bridgefile`;
+  }
+  // RSA
+  const n = Buffer.from(jwk.n, 'base64url');
+  const e = Buffer.from(jwk.e, 'base64url');
+  // Prepend 0x00 if high bit set (to indicate positive mpint)
+  const mpint = (b: Buffer) => (b[0] & 0x80 ? Buffer.concat([Buffer.from([0]), b]) : b);
+  const blob = Buffer.concat([
+    lenPrefix(Buffer.from('ssh-rsa')),
+    lenPrefix(mpint(e)),
+    lenPrefix(mpint(n)),
+  ]);
+  return `ssh-rsa ${blob.toString('base64')} bridgefile`;
+}
+
 // ── Path validation (prevent traversal outside user directories) ──
 
 const ALLOWED_ROOTS = [os.homedir(), os.tmpdir(), app.getPath('temp'), app.getPath('downloads')];
@@ -156,6 +189,30 @@ function startTransfer(transfer: TransferItem): void {
     .finally(() => {
       runningTransferIds.delete(transfer.id);
       activeTransferControllers.delete(transfer.id);
+      // Persist to history (skip transient 'in-progress' — only final states)
+      if (
+        transfer.status === 'completed' ||
+        transfer.status === 'failed' ||
+        transfer.status === 'cancelled'
+      ) {
+        store.appendHistory({
+          id: transfer.id,
+          timestamp: Date.now(),
+          protocol: transfer.protocol,
+          direction: transfer.direction,
+          connectionId: transfer.connectionId,
+          localPath: transfer.localPath,
+          remotePath: transfer.remotePath,
+          fileName: transfer.fileName,
+          size: transfer.size,
+          entryType: transfer.entryType,
+          status: transfer.status,
+          error: transfer.error,
+          durationMs: transfer.startedAt && transfer.completedAt
+            ? transfer.completedAt - transfer.startedAt
+            : undefined,
+        });
+      }
       trimCompletedTransfers();
       scheduleTransfers();
     });
@@ -1003,7 +1060,63 @@ export function registerIPCHandlers(): void {
     return store.deleteBookmark(id);
   });
 
+  // ── Transfer history ──────────────────────────────────────
+
+  ipcMain.handle('history:list', async (_event, limit?: number) => {
+    return store.readHistory(limit ?? 500);
+  });
+
+  ipcMain.handle('history:clear', async () => {
+    store.clearHistory();
+    return true;
+  });
+
+  // Prune old history entries at startup
+  store.pruneHistory();
+
   // ── App info ───────────────────────────────────────────────
+
+  // ── SSH key generation ──────────────────────────────────
+
+  ipcMain.handle('app:generateSSHKey', async (_event, options: { type?: 'ed25519' | 'rsa'; bits?: number; passphrase?: string; path?: string }) => {
+    const keyType = options.type ?? 'ed25519';
+    const bits = options.bits ?? 3072;
+
+    const { generateKeyPairSync } = crypto;
+    let keyPair;
+    if (keyType === 'ed25519') {
+      keyPair = generateKeyPairSync('ed25519' as any, {});
+    } else {
+      keyPair = generateKeyPairSync('rsa' as any, { modulusLength: bits });
+    }
+
+    const privateKeyEncoding: any = options.passphrase
+      ? { type: 'pkcs8', format: 'pem', cipher: 'aes-256-cbc', passphrase: options.passphrase }
+      : { type: 'pkcs8', format: 'pem' };
+    const privatePem = keyPair.privateKey.export(privateKeyEncoding) as string;
+    const publicPem = keyPair.publicKey.export({ type: 'spki', format: 'pem' }) as string;
+
+    // OpenSSH public key format is what servers expect in authorized_keys.
+    // Node can export public keys in OpenSSH format via `jwk` → openssh using `ssh-keygen`,
+    // but without external deps, we expose both PEM formats and let the user copy as-is.
+    // For ed25519 and RSA, we produce an OpenSSH-format pubkey manually.
+    const opensshPub = toOpenSSHFormat(keyPair.publicKey, keyType);
+
+    // Default path: ~/.ssh/bridgefile_<timestamp>
+    const sshDir = path.join(os.homedir(), '.ssh');
+    try { fs.mkdirSync(sshDir, { recursive: true, mode: 0o700 }); } catch { /* ignore */ }
+    const basePath = options.path || path.join(sshDir, `bridgefile_${Date.now()}_${keyType}`);
+
+    fs.writeFileSync(basePath, privatePem, { mode: 0o600 });
+    fs.writeFileSync(`${basePath}.pub`, opensshPub + '\n', { mode: 0o644 });
+
+    return {
+      privateKeyPath: basePath,
+      publicKeyPath: `${basePath}.pub`,
+      publicKeyOpenSSH: opensshPub,
+      privateKeyPEM: privatePem,
+    };
+  });
 
   ipcMain.handle('app:getVersion', async () => {
     return app.getVersion();

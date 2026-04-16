@@ -135,6 +135,8 @@ export default function ConnectionBar({
                 : 'text-[#71717a] hover:text-[#a1a1aa] hover:bg-[#1a1a26]'
             }`}
             title={syncBrowsing ? 'Disable synchronized browsing' : 'Enable synchronized browsing'}
+            aria-label={syncBrowsing ? 'Disable synchronized browsing' : 'Enable synchronized browsing'}
+            aria-pressed={syncBrowsing}
           >
             <svg width="15" height="15" viewBox="0 0 24 24" fill="none">
               <path
@@ -154,6 +156,7 @@ export default function ConnectionBar({
             onClick={onToggleTheme}
             className="p-1.5 rounded text-[#71717a] hover:text-[#a1a1aa] hover:bg-[#1a1a26] transition-colors"
             title={theme === 'dark' ? 'Switch to light theme' : 'Switch to dark theme'}
+            aria-label={theme === 'dark' ? 'Switch to light theme' : 'Switch to dark theme'}
           >
             {theme === 'dark' ? (
               <svg width="15" height="15" viewBox="0 0 24 24" fill="none">
@@ -173,6 +176,7 @@ export default function ConnectionBar({
           onClick={onSettingsClick}
           className="p-1.5 rounded text-[#71717a] hover:text-[#a1a1aa] hover:bg-[#1a1a26] transition-colors"
           title="Settings"
+          aria-label="Open preferences"
         >
           <svg width="15" height="15" viewBox="0 0 24 24" fill="none">
             <path

@@ -1,4 +1,5 @@
 import React, { useState, useEffect, useCallback, useRef } from 'react';
+import { highlight, detectLanguage } from '../lib/highlight';
 
 // ── Types ──────────────────────────────────────────────────────
 
@@ -197,6 +198,7 @@ export default function FileEditor({
               content={content}
               onChange={setContent}
               onKeyDown={handleKeyDown}
+              fileName={fileName}
             />
           )}
         </div>
@@ -240,19 +242,30 @@ function LineNumberedEditor({
   content,
   onChange,
   onKeyDown,
+  fileName,
 }: {
   content: string;
   onChange: (value: string) => void;
   onKeyDown: (e: React.KeyboardEvent) => void;
+  fileName: string;
 }) {
   const textareaRef = useRef<HTMLTextAreaElement>(null);
   const lineNumberRef = useRef<HTMLDivElement>(null);
+  const highlightRef = useRef<HTMLPreElement>(null);
   const lineCount = content.split('\n').length;
   const gutterWidth = Math.max(3, String(lineCount).length) * 9 + 16;
+  const language = detectLanguage(fileName);
+  // Only highlight for reasonably-sized files (avoid jank on huge files)
+  const useHighlight = language !== 'plain' && content.length < 500_000;
+  const highlighted = useHighlight ? highlight(content, language) : '';
 
   const handleScroll = () => {
-    if (textareaRef.current && lineNumberRef.current) {
-      lineNumberRef.current.scrollTop = textareaRef.current.scrollTop;
+    const ta = textareaRef.current;
+    if (!ta) return;
+    if (lineNumberRef.current) lineNumberRef.current.scrollTop = ta.scrollTop;
+    if (highlightRef.current) {
+      highlightRef.current.scrollTop = ta.scrollTop;
+      highlightRef.current.scrollLeft = ta.scrollLeft;
     }
   };
 
@@ -267,16 +280,36 @@ function LineNumberedEditor({
           <div key={i} className="pr-2 pl-2">{i + 1}</div>
         ))}
       </div>
-      <textarea
-        ref={textareaRef}
-        value={content}
-        onChange={(e) => onChange(e.target.value)}
-        onKeyDown={onKeyDown}
-        onScroll={handleScroll}
-        className="flex-1 h-full resize-none bg-[#0a0a0f] text-[#e4e4e7] font-mono text-xs leading-5 p-3 focus:outline-none border-none"
-        spellCheck={false}
-        wrap="off"
-      />
+      <div className="relative flex-1 h-full overflow-hidden bg-[#0a0a0f]">
+        {/* Highlighted layer (visible, scrolled by syncing with textarea) */}
+        {useHighlight && (
+          <pre
+            ref={highlightRef}
+            aria-hidden="true"
+            className="absolute inset-0 m-0 p-3 font-mono text-xs leading-5 whitespace-pre overflow-auto pointer-events-none text-[#e4e4e7]"
+          >
+            <code dangerouslySetInnerHTML={{ __html: highlighted + '\n' }} />
+          </pre>
+        )}
+        {/* Textarea on top: transparent text so only caret/selection show */}
+        <textarea
+          ref={textareaRef}
+          value={content}
+          onChange={(e) => onChange(e.target.value)}
+          onKeyDown={onKeyDown}
+          onScroll={handleScroll}
+          className={`absolute inset-0 resize-none bg-transparent font-mono text-xs leading-5 p-3 focus:outline-none border-none caret-[#e4e4e7] ${
+            useHighlight ? '' : 'text-[#e4e4e7]'
+          }`}
+          spellCheck={false}
+          wrap="off"
+          style={
+            useHighlight
+              ? { color: 'transparent', WebkitTextFillColor: 'transparent' }
+              : undefined
+          }
+        />
+      </div>
     </div>
   );
 }

@@ -14,6 +14,7 @@ import type {
   UIConnectionProfile as ConnectionProfile,
 } from '../../shared/connection-profile-ui';
 import { t } from '../lib/i18n';
+import { exportToJSON, importAuto, type ImportedProfile } from '../lib/profile-io';
 import { logConnection, logConnected, logError } from './LogPanel';
 export type { UIConnectionProfile as ConnectionProfile } from '../../shared/connection-profile-ui';
 
@@ -320,6 +321,113 @@ export default function ConnectionManager({
     setNewGroupName(null);
   };
 
+  // ── SSH key generation ────────────────────────────────────
+
+  const handleGenerateKey = async () => {
+    if (!isElectron()) return;
+    const passphrase = window.prompt(
+      'Enter a passphrase for the new SSH key (leave blank for no passphrase).\n\nA new ed25519 key pair will be created in ~/.ssh/',
+      '',
+    );
+    if (passphrase === null) return; // user cancelled
+    try {
+      const result = await window.bridgefile.app.generateSSHKey({
+        type: 'ed25519',
+        passphrase: passphrase || undefined,
+      });
+      updateField('privateKeyPath', result.privateKeyPath);
+      if (passphrase) updateField('passphrase', passphrase);
+      window.prompt(
+        `Key pair created!\n\nPrivate key: ${result.privateKeyPath}\nPublic key:  ${result.publicKeyPath}\n\nCopy the public key below and add it to the server's ~/.ssh/authorized_keys:`,
+        result.publicKeyOpenSSH,
+      );
+    } catch (err) {
+      alert(`Key generation failed: ${err instanceof Error ? err.message : String(err)}`);
+    }
+  };
+
+  // ── Import / Export ───────────────────────────────────────
+
+  const handleExport = () => {
+    const toExport: ImportedProfile[] = profiles.map((p) => ({
+      name: p.name,
+      type: p.type,
+      host: p.host,
+      port: p.port,
+      username: p.username,
+      accessKeyId: p.accessKey,
+      // Intentionally DO NOT export secrets (password/secretKey/privateKey) —
+      // exports are meant to be shareable / version-controlled.
+      region: p.region,
+      bucket: p.bucket,
+      prefix: p.prefix,
+      endpoint: p.endpoint,
+      secure: p.secure,
+      proxyHost: p.proxyHost,
+      proxyPort: p.proxyPort,
+      proxyUsername: p.proxyUsername,
+      timeout: p.timeout,
+      group: p.group,
+      favorite: p.favorite,
+    }));
+    const json = exportToJSON(toExport);
+    const blob = new Blob([json], { type: 'application/json' });
+    const url = URL.createObjectURL(blob);
+    const a = document.createElement('a');
+    a.href = url;
+    a.download = `bridgefile-profiles-${new Date().toISOString().slice(0, 10)}.json`;
+    a.click();
+    URL.revokeObjectURL(url);
+  };
+
+  const handleImport = () => {
+    const input = document.createElement('input');
+    input.type = 'file';
+    input.accept = '.json,.xml,.ini';
+    input.onchange = async (e) => {
+      const file = (e.target as HTMLInputElement).files?.[0];
+      if (!file) return;
+      try {
+        const text = await file.text();
+        const imported = importAuto(text, file.name);
+        let added = 0;
+        for (const p of imported) {
+          const profile: ConnectionProfile = {
+            id: crypto.randomUUID(),
+            name: p.name,
+            type: p.type,
+            favorite: p.favorite ?? false,
+            group: p.group,
+            host: p.host,
+            port: p.port,
+            username: p.username,
+            accessKey: p.accessKeyId,
+            region: p.region,
+            bucket: p.bucket,
+            prefix: p.prefix,
+            endpoint: p.endpoint,
+            secure: p.secure,
+            proxyHost: p.proxyHost,
+            proxyPort: p.proxyPort,
+            proxyUsername: p.proxyUsername,
+            timeout: p.timeout,
+          };
+          try {
+            const saved = await persistProfile(profile);
+            applyProfileLocally(saved);
+            added++;
+          } catch {
+            // skip failed ones
+          }
+        }
+        alert(`Imported ${added} of ${imported.length} profiles.\n\nNote: passwords/keys must be re-entered for security.`);
+      } catch (err) {
+        alert(`Import failed: ${err instanceof Error ? err.message : String(err)}`);
+      }
+    };
+    input.click();
+  };
+
   return (
     <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/60 backdrop-blur-sm">
       <div className="w-[720px] max-h-[600px] bg-[#12121a] border border-[#1e1e2e] rounded-lg shadow-2xl flex overflow-hidden">
@@ -338,10 +446,29 @@ export default function ConnectionManager({
                 onClick={() => setNewGroupName('')}
                 className="px-2 py-1.5 text-xs rounded text-[#a1a1aa] hover:bg-[#1a1a26] border border-[#1e1e2e] transition-colors"
                 title={t('new_folder')}
+                aria-label="New group"
               >
                 <svg width="12" height="12" viewBox="0 0 24 24" fill="none">
                   <path d="M22 19a2 2 0 01-2 2H4a2 2 0 01-2-2V5a2 2 0 012-2h5l2 3h9a2 2 0 012 2z" stroke="currentColor" strokeWidth="2" />
                 </svg>
+              </button>
+            </div>
+            {/* Import / Export row */}
+            <div className="flex gap-1 mt-2">
+              <button
+                onClick={handleImport}
+                className="flex-1 px-2 py-1 text-[10px] rounded text-[#a1a1aa] hover:bg-[#1a1a26] border border-[#1e1e2e] transition-colors"
+                title="Import profiles from JSON, FileZilla XML, or WinSCP INI"
+              >
+                Import
+              </button>
+              <button
+                onClick={handleExport}
+                disabled={profiles.length === 0}
+                className="flex-1 px-2 py-1 text-[10px] rounded text-[#a1a1aa] hover:bg-[#1a1a26] border border-[#1e1e2e] transition-colors disabled:opacity-40 disabled:cursor-not-allowed"
+                title="Export all profiles to JSON (secrets excluded)"
+              >
+                Export
               </button>
             </div>
             {newGroupName !== null && (
@@ -598,9 +725,19 @@ export default function ConnectionManager({
                   />
                 </div>
                 <div className="mb-3">
-                  <label className="block text-[11px] text-[#71717a] mb-1 uppercase tracking-wide">
-                    Private Key Path
-                  </label>
+                  <div className="flex items-center justify-between mb-1">
+                    <label className="block text-[11px] text-[#71717a] uppercase tracking-wide">
+                      Private Key Path
+                    </label>
+                    <button
+                      type="button"
+                      onClick={handleGenerateKey}
+                      className="text-[10px] text-[#3b82f6] hover:text-[#60a5fa] hover:underline"
+                      title="Generate a new ed25519 SSH key pair"
+                    >
+                      Generate new key
+                    </button>
+                  </div>
                   <input
                     type="text"
                     value={formData.privateKeyPath || ''}

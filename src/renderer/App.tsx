@@ -23,6 +23,7 @@ import type { Preferences } from './components/PreferencesDialog';
 import ShortcutsHelp from './components/ShortcutsHelp';
 import AboutDialog from './components/AboutDialog';
 import WelcomeScreen from './components/WelcomeScreen';
+import HistoryPanel from './components/HistoryPanel';
 
 const PREFERENCES_STORAGE_KEY = 'bridgefile.preferences';
 
@@ -44,7 +45,7 @@ function savePreferences(prefs: Preferences): void {
   }
 }
 
-type BottomTab = 'transfers' | 'log';
+type BottomTab = 'transfers' | 'log' | 'history';
 
 interface UpdateInfo {
   latestVersion: string;
@@ -988,6 +989,14 @@ export default function App() {
               }}
               label="Log"
             />
+            <BottomTabButton
+              active={bottomTab === 'history'}
+              onClick={() => {
+                setBottomTab('history');
+                if (bottomCollapsed) setBottomCollapsed(false);
+              }}
+              label="History"
+            />
           </div>
 
           {/* Collapse toggle */}
@@ -1017,7 +1026,9 @@ export default function App() {
         {/* Tab content */}
         {!bottomCollapsed && (
           <div className="flex-1 min-h-0 overflow-hidden">
-            {bottomTab === 'transfers' ? <TransferQueue /> : <LogPanel />}
+            {bottomTab === 'transfers' && <TransferQueue />}
+            {bottomTab === 'log' && <LogPanel />}
+            {bottomTab === 'history' && <HistoryPanel />}
           </div>
         )}
       </div>
