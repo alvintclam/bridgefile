@@ -48,6 +48,7 @@ interface FilePaneProps {
   onCompare?: () => void;
   onSearch?: () => void;
   onEditFile?: (file: { path: string; name: string; size: number }) => void;
+  onOpenExternal?: (file: { path: string; name: string }) => void;
   onChecksum?: (file: { path: string; name: string }) => void;
   onPermissions?: (file: { path: string; name: string; permissions: string }) => void;
 }
@@ -101,6 +102,7 @@ export default function FilePane({
   onCompare,
   onSearch,
   onEditFile,
+  onOpenExternal,
   onChecksum,
   onPermissions,
 }: FilePaneProps) {
@@ -1104,6 +1106,15 @@ export default function FilePane({
                 }
               : undefined
             }
+            onOpenExternal={contextMenu.file && !contextMenu.file.isDirectory && side === 'remote' && onOpenExternal
+              ? () => {
+                  const file = contextMenu.file!;
+                  const filePath = joinPath(currentPath, file.name, side);
+                  onOpenExternal({ path: filePath, name: file.name });
+                  setContextMenu(null);
+                }
+              : undefined
+            }
             onChecksum={contextMenu.file && !contextMenu.file.isDirectory
               ? () => {
                   const file = contextMenu.file!;
@@ -1223,6 +1234,7 @@ function ContextMenu({
   onSearch,
   onCompare,
   onEditFile,
+  onOpenExternal,
   onChecksum,
   onPermissions,
 }: {
@@ -1242,6 +1254,7 @@ function ContextMenu({
   onSearch?: () => void;
   onCompare?: () => void;
   onEditFile?: () => void;
+  onOpenExternal?: () => void;
   onChecksum?: () => void;
   onPermissions?: () => void;
 }) {
@@ -1328,6 +1341,9 @@ function ContextMenu({
       }} disabled />
       {onEditFile && (
         <MenuItem label={t('edit_file')} onClick={onEditFile} />
+      )}
+      {onOpenExternal && (
+        <MenuItem label="Open in external editor" onClick={onOpenExternal} />
       )}
       {onChecksum && (
         <MenuItem label={t('checksum')} onClick={onChecksum} />

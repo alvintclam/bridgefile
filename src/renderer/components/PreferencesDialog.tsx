@@ -33,6 +33,18 @@ export default function PreferencesDialog({ isOpen, onClose, preferences, onSave
     if (isOpen) setDraft(preferences);
   }, [isOpen, preferences]);
 
+  useEffect(() => {
+    if (!isOpen) return;
+    const handler = (e: KeyboardEvent) => {
+      if (e.key === 'Escape') {
+        e.preventDefault();
+        onClose();
+      }
+    };
+    window.addEventListener('keydown', handler);
+    return () => window.removeEventListener('keydown', handler);
+  }, [isOpen, onClose]);
+
   if (!isOpen) return null;
 
   const set = <K extends keyof Preferences>(key: K, value: Preferences[K]) => {

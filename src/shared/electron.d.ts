@@ -128,6 +128,10 @@ export interface BridgeFileAPI {
       privateKeyPEM: string;
     }>;
     editRemoteFile(protocol: string, connId: string, remotePath: string): Promise<string>;
+    openInExternalEditor(protocol: string, connId: string, remotePath: string): Promise<{ tmpPath: string }>;
+    onExternalEditorEvent(
+      listener: (event: 'saved' | 'error', data: { remotePath: string; error?: string }) => void,
+    ): () => void;
     saveRemoteFile(protocol: string, connId: string, remotePath: string, content: string): Promise<void>;
     computeRemoteChecksum(
       protocol: 'sftp' | 's3' | 'ftp',

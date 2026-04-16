@@ -153,6 +153,18 @@ const api = {
     getPlatform: () => ipcRenderer.invoke('app:getPlatform'),
     editRemoteFile: (protocol: string, connId: string, remotePath: string) =>
       ipcRenderer.invoke('app:editRemoteFile', protocol, connId, remotePath),
+    openInExternalEditor: (protocol: string, connId: string, remotePath: string) =>
+      ipcRenderer.invoke('app:openInExternalEditor', protocol, connId, remotePath),
+    onExternalEditorEvent: (listener: (event: 'saved' | 'error', data: { remotePath: string; error?: string }) => void) => {
+      const savedHandler = (_e: unknown, data: { remotePath: string }) => listener('saved', data);
+      const errorHandler = (_e: unknown, data: { remotePath: string; error?: string }) => listener('error', data);
+      ipcRenderer.on('app:externalEditorSaved', savedHandler);
+      ipcRenderer.on('app:externalEditorError', errorHandler);
+      return () => {
+        ipcRenderer.removeListener('app:externalEditorSaved', savedHandler);
+        ipcRenderer.removeListener('app:externalEditorError', errorHandler);
+      };
+    },
     saveRemoteFile: (protocol: string, connId: string, remotePath: string, content: string) =>
       ipcRenderer.invoke('app:saveRemoteFile', protocol, connId, remotePath, content),
     computeRemoteChecksum: (

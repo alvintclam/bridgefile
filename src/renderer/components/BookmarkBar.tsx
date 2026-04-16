@@ -95,6 +95,8 @@ export default function BookmarkBar({ currentPath, connectionId, onNavigate }: B
             : 'text-[#3a3a4a] cursor-not-allowed'
         }`}
         title={isCurrentBookmarked ? 'Already bookmarked' : 'Bookmark current path'}
+        aria-label={isCurrentBookmarked ? 'Already bookmarked' : 'Bookmark current path'}
+        aria-pressed={isCurrentBookmarked}
       >
         {isCurrentBookmarked ? (
           <svg width="13" height="13" viewBox="0 0 24 24" fill="currentColor">
@@ -130,6 +132,7 @@ export default function BookmarkBar({ currentPath, connectionId, onNavigate }: B
               handleRemove(bookmark.id);
             }}
             className="ml-0.5 text-[#71717a] hover:text-red-400 opacity-0 group-hover:opacity-100 transition-opacity shrink-0"
+            aria-label={`Remove bookmark ${bookmark.name}`}
           >
             <svg width="10" height="10" viewBox="0 0 24 24" fill="none">
               <path d="M18 6L6 18M6 6l12 12" stroke="currentColor" strokeWidth="2" strokeLinecap="round" />

@@ -115,6 +115,7 @@ export default function TabBar({
               }}
               className="ml-1 p-0.5 rounded text-[#71717a] hover:text-red-400 hover:bg-red-500/10 transition-colors shrink-0"
               title="Close tab"
+              aria-label={`Close tab ${tab.name}`}
             >
               <svg width="10" height="10" viewBox="0 0 24 24" fill="none">
                 <path
@@ -134,6 +135,7 @@ export default function TabBar({
         onClick={onNewTab}
         className="flex items-center justify-center w-7 h-full text-[#71717a] hover:text-[#a1a1aa] hover:bg-[#12121a] transition-colors shrink-0"
         title="New connection tab"
+        aria-label="Open new connection tab"
       >
         <svg width="14" height="14" viewBox="0 0 24 24" fill="none">
           <path

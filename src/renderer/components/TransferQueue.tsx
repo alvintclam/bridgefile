@@ -405,8 +405,16 @@ export default function TransferQueue() {
       {/* Transfer list */}
       <div className="flex-1 overflow-y-auto">
         {transfers.length === 0 ? (
-          <div className="flex items-center justify-center h-full text-[#71717a] text-xs">
-            {t('no_transfers')}
+          <div className="flex flex-col items-center justify-center h-full text-[#71717a] text-xs gap-2 px-4 text-center">
+            <svg width="28" height="28" viewBox="0 0 24 24" fill="none" className="text-[#52525b]">
+              <path d="M7 10l5-5 5 5M12 5v14" stroke="currentColor" strokeWidth="1.5" strokeLinecap="round" strokeLinejoin="round" />
+            </svg>
+            <div className="text-[#a1a1aa]">{t('no_transfers')}</div>
+            <div className="text-[10px] text-[#52525b] max-w-sm">
+              Active and queued transfers will appear here.
+              Drag files between panes or use ⌘/Ctrl+C+V to start a transfer.
+              See the <span className="text-[#71717a]">History</span> tab for past transfers.
+            </div>
           </div>
         ) : (
           transfers.map(t => {
@@ -483,6 +491,7 @@ export default function TransferQueue() {
                       onClick={() => retryTransfer(t.id)}
                       className="p-1 rounded text-[#71717a] hover:text-amber-400 hover:bg-amber-500/10 transition-colors"
                       title="Retry"
+                      aria-label={`Retry transfer ${t.filename}`}
                     >
                       <svg width="12" height="12" viewBox="0 0 24 24" fill="none">
                         <path d="M1 4v6h6M23 20v-6h-6" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" />
@@ -495,6 +504,7 @@ export default function TransferQueue() {
                       onClick={() => cancelTransfer(t.id)}
                       className="p-1 rounded text-[#71717a] hover:text-red-400 hover:bg-red-500/10 transition-colors"
                       title="Cancel"
+                      aria-label={`Cancel transfer ${t.filename}`}
                     >
                       <svg width="12" height="12" viewBox="0 0 24 24" fill="none">
                         <path d="M18 6L6 18M6 6l12 12" stroke="currentColor" strokeWidth="2" strokeLinecap="round" />

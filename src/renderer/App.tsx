@@ -168,6 +168,20 @@ export default function App() {
     return () => clearTimeout(timer);
   }, []);
 
+  // Listen for external editor save/error events
+  useEffect(() => {
+    if (typeof window === 'undefined' || !window.bridgefile) return;
+    const unsubscribe = window.bridgefile.app.onExternalEditorEvent((ev, data) => {
+      if (ev === 'saved') {
+        addLog('success', `Auto-uploaded changes to "${data.remotePath}"`);
+        setRemoteRefreshToken((t) => t + 1);
+      } else {
+        logError(`External edit upload failed (${data.remotePath}): ${data.error ?? 'unknown'}`);
+      }
+    });
+    return unsubscribe;
+  }, []);
+
   // Check if user has existing connections (for welcome screen)
   useEffect(() => {
     if (typeof window === 'undefined' || !window.bridgefile) {
@@ -932,6 +946,19 @@ export default function App() {
               });
               setShowEditor(true);
             }}
+            onOpenExternal={remoteProtocol && connectionId
+              ? (file) => {
+                  window.bridgefile.app
+                    .openInExternalEditor(remoteProtocol, connectionId, file.path)
+                    .then(() => {
+                      addLog('info', `Opened "${file.name}" in external editor (changes auto-upload on save)`);
+                    })
+                    .catch((err: unknown) => {
+                      logError(`External editor open failed: ${err instanceof Error ? err.message : String(err)}`);
+                    });
+                }
+              : undefined
+            }
             onChecksum={remoteProtocol
               ? (file) => {
                   setSelectedFile({
@@ -1004,6 +1031,8 @@ export default function App() {
             onClick={() => setBottomCollapsed((c) => !c)}
             className="p-1 rounded text-[#71717a] hover:text-[#a1a1aa] hover:bg-[#1a1a26] transition-colors"
             title={bottomCollapsed ? 'Expand' : 'Collapse'}
+            aria-label={bottomCollapsed ? 'Expand bottom panel' : 'Collapse bottom panel'}
+            aria-expanded={!bottomCollapsed}
           >
             <svg
               width="12"

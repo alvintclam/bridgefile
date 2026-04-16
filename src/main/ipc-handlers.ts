@@ -1,4 +1,4 @@
-import { ipcMain, app, dialog, BrowserWindow } from 'electron';
+import { ipcMain, app, dialog, BrowserWindow, shell } from 'electron';
 import * as os from 'os';
 import * as fs from 'fs';
 import * as path from 'path';
@@ -1163,6 +1163,62 @@ export function registerIPCHandlers(): void {
       await downloadRemoteToTemp(protocol as 'sftp' | 's3' | 'ftp', connId, remotePath, tmpPath);
 
       return tmpPath;
+    },
+  );
+
+  // Open file in system default external editor, watch for changes, auto-upload on save
+  ipcMain.handle(
+    'app:openInExternalEditor',
+    async (_event, protocol: string, connId: string, remotePath: string) => {
+      const tmpDir = path.join(app.getPath('temp'), 'bridgefile-external');
+      fs.mkdirSync(tmpDir, { recursive: true });
+
+      const fileName = path.basename(remotePath);
+      const uniqueDir = path.join(tmpDir, crypto.randomUUID());
+      fs.mkdirSync(uniqueDir, { recursive: true });
+      const tmpPath = path.join(uniqueDir, fileName);
+
+      await downloadRemoteToTemp(protocol as 'sftp' | 's3' | 'ftp', connId, remotePath, tmpPath);
+
+      // Open in system default editor (non-blocking)
+      await shell.openPath(tmpPath).catch(() => {});
+
+      // Watch the file for changes — auto-upload on save.
+      // fs.watch can be flaky cross-platform; we check mtime on change events.
+      let lastMtimeMs = fs.statSync(tmpPath).mtimeMs;
+      let uploadInFlight = false;
+      const win = BrowserWindow.getFocusedWindow();
+
+      const watcher = fs.watch(tmpPath, async () => {
+        try {
+          const stat = fs.statSync(tmpPath);
+          if (stat.mtimeMs === lastMtimeMs || uploadInFlight) return;
+          lastMtimeMs = stat.mtimeMs;
+          uploadInFlight = true;
+
+          if (protocol === 'sftp') await sftpClient.upload(connId, tmpPath, remotePath);
+          else if (protocol === 'ftp') await ftpClient.upload(connId, tmpPath, remotePath);
+          else if (protocol === 's3') await s3Client.upload(connId, tmpPath, remotePath);
+
+          win?.webContents.send('app:externalEditorSaved', { remotePath });
+        } catch (err) {
+          win?.webContents.send('app:externalEditorError', {
+            remotePath,
+            error: err instanceof Error ? err.message : String(err),
+          });
+        } finally {
+          uploadInFlight = false;
+        }
+      });
+
+      // Close watcher after 30 minutes to avoid leak (user should be done by then)
+      setTimeout(() => {
+        try { watcher.close(); } catch { /* ignore */ }
+        try { fs.unlinkSync(tmpPath); } catch { /* ignore */ }
+        try { fs.rmdirSync(uniqueDir); } catch { /* ignore */ }
+      }, 30 * 60 * 1000);
+
+      return { tmpPath };
     },
   );
 
