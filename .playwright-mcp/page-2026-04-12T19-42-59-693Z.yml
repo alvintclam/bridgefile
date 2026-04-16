@@ -1,0 +1,114 @@
+- generic [ref=e3]:
+  - generic [ref=e4]:
+    - generic [ref=e5]:
+      - generic [ref=e6]:
+        - img [ref=e7]
+        - generic [ref=e10]: BridgeFile
+      - generic [ref=e12]: No connection
+    - generic [ref=e13]:
+      - generic [ref=e16]: Disconnected
+      - button "Connect" [ref=e17] [cursor=pointer]
+      - button "Enable synchronized browsing" [ref=e18] [cursor=pointer]:
+        - img [ref=e19]
+      - button "Switch to light theme" [ref=e21] [cursor=pointer]:
+        - img [ref=e22]
+      - button "Settings" [ref=e25] [cursor=pointer]:
+        - img [ref=e26]
+  - generic [ref=e29]:
+    - button "Bookmark current path" [disabled] [ref=e30]:
+      - img [ref=e31]
+    - generic [ref=e33]: No bookmarks — click the star to save a path
+  - generic [ref=e34]:
+    - generic [ref=e36]:
+      - generic [ref=e37]:
+        - generic [ref=e38]: Local
+        - generic [ref=e39]:
+          - textbox "Search..." [ref=e40]
+          - img [ref=e41]
+        - button "Refresh" [ref=e44] [cursor=pointer]:
+          - img [ref=e45]
+      - generic [ref=e48]:
+        - button "Go up" [ref=e49] [cursor=pointer]:
+          - img [ref=e50]
+        - generic "Click to edit path" [ref=e52] [cursor=pointer]:
+          - button "~" [ref=e53]
+      - generic [ref=e54]:
+        - button "Name ↑" [ref=e55] [cursor=pointer]:
+          - text: Name
+          - generic [ref=e56]: ↑
+        - button "Size" [ref=e57] [cursor=pointer]
+        - button "Modified" [ref=e58] [cursor=pointer]
+        - generic [ref=e59]: Permissions
+      - generic [ref=e61]:
+        - img [ref=e62]
+        - generic [ref=e64]: No files
+        - generic [ref=e65]: Drop files here to transfer
+      - generic [ref=e66]:
+        - generic [ref=e67]: 0 items
+        - generic [ref=e68]: /
+    - generic [ref=e72]:
+      - generic [ref=e73]:
+        - generic [ref=e74]: Remote
+        - generic [ref=e75]:
+          - textbox "Search..." [ref=e76]
+          - img [ref=e77]
+        - button "Refresh" [ref=e80] [cursor=pointer]:
+          - img [ref=e81]
+      - generic [ref=e84]:
+        - button "Go up" [ref=e85] [cursor=pointer]:
+          - img [ref=e86]
+        - generic "Click to edit path" [ref=e88] [cursor=pointer]:
+          - button / [ref=e89]
+      - generic [ref=e90]:
+        - button "Name ↑" [ref=e91] [cursor=pointer]:
+          - text: Name
+          - generic [ref=e92]: ↑
+        - button "Size" [ref=e93] [cursor=pointer]
+        - button "Modified" [ref=e94] [cursor=pointer]
+        - generic [ref=e95]: Permissions
+      - generic [ref=e97]:
+        - img [ref=e98]
+        - generic [ref=e100]: No files
+        - generic [ref=e101]: Drop files here to transfer
+      - generic [ref=e102]:
+        - generic [ref=e103]: 0 items
+        - generic [ref=e104]: /
+  - generic [ref=e105]:
+    - generic [ref=e108]:
+      - generic [ref=e109]:
+        - button "Transfers" [ref=e110] [cursor=pointer]
+        - button "Log" [ref=e111] [cursor=pointer]
+      - button "Collapse" [ref=e112] [cursor=pointer]:
+        - img [ref=e113]
+    - generic [ref=e116]:
+      - generic [ref=e117]:
+        - generic [ref=e118]:
+          - generic [ref=e119]: 0 transfers
+          - generic [ref=e120]: 0 B / 0 B
+        - generic [ref=e121]:
+          - generic [ref=e122]:
+            - generic [ref=e123]:
+              - img [ref=e125]
+              - generic [ref=e127]: 0 B/s
+            - generic [ref=e128]:
+              - img [ref=e130]
+              - generic [ref=e132]: 0 B/s
+            - button "Unlimited" [ref=e133] [cursor=pointer]:
+              - img [ref=e134]
+              - generic [ref=e137]: Unlimited
+              - img [ref=e138]
+          - generic [ref=e140]:
+            - generic [ref=e141]: "Max:"
+            - combobox [ref=e142]:
+              - option "1"
+              - option "2" [selected]
+              - option "3"
+              - option "4"
+              - option "5"
+              - option "6"
+              - option "7"
+              - option "8"
+              - option "9"
+              - option "10"
+          - button "Pause transfers" [ref=e143] [cursor=pointer]
+      - generic [ref=e145]: No transfers

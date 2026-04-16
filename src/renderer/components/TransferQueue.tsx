@@ -2,6 +2,7 @@ import React, { useState, useEffect, useRef, useCallback, useMemo } from 'react'
 import SpeedIndicator from './SpeedIndicator';
 import type { SpeedLimit } from './SpeedIndicator';
 import { t } from '../lib/i18n';
+import { logError } from './LogPanel';
 
 export type TransferStatus = 'queued' | 'transferring' | 'completed' | 'failed' | 'paused' | 'cancelled';
 
@@ -237,6 +238,7 @@ export default function TransferQueue() {
     window.bridgefile.transfer
       .moveToTop(id)
       .then(() => fetchQueueState())
+      .catch((err: unknown) => logError(`Move to top failed: ${err instanceof Error ? err.message : String(err)}`))
       .finally(() => setContextMenu(null));
   }, [fetchQueueState]);
 
@@ -248,7 +250,8 @@ export default function TransferQueue() {
 
     window.bridgefile.transfer
       .setPaused(true)
-      .then(() => fetchQueueState());
+      .then(() => fetchQueueState())
+      .catch((err: unknown) => logError(`Pause all failed: ${err instanceof Error ? err.message : String(err)}`));
   }, [fetchQueueState]);
 
   const handleResumeAll = useCallback(() => {
@@ -259,7 +262,8 @@ export default function TransferQueue() {
 
     window.bridgefile.transfer
       .setPaused(false)
-      .then(() => fetchQueueState());
+      .then(() => fetchQueueState())
+      .catch((err: unknown) => logError(`Resume all failed: ${err instanceof Error ? err.message : String(err)}`));
   }, [fetchQueueState]);
 
   const handleMaxConcurrentChange = useCallback((nextValue: number) => {
@@ -270,7 +274,8 @@ export default function TransferQueue() {
 
     window.bridgefile.transfer
       .setMaxConcurrent(nextValue)
-      .then(() => fetchQueueState());
+      .then(() => fetchQueueState())
+      .catch((err: unknown) => logError(`Set max concurrent failed: ${err instanceof Error ? err.message : String(err)}`));
   }, [fetchQueueState]);
 
   const handleSpeedLimitChange = useCallback((nextLimit: SpeedLimit) => {
@@ -282,7 +287,8 @@ export default function TransferQueue() {
     const normalizedLimit = nextLimit === 'unlimited' ? null : Number(nextLimit);
     window.bridgefile.transfer
       .setSpeedLimit(normalizedLimit)
-      .then(() => fetchQueueState());
+      .then(() => fetchQueueState())
+      .catch((err: unknown) => logError(`Set speed limit failed: ${err instanceof Error ? err.message : String(err)}`));
   }, [fetchQueueState]);
 
   const handleContextMenu = useCallback((e: React.MouseEvent, id: string) => {
@@ -340,7 +346,7 @@ export default function TransferQueue() {
 
         <div className="flex items-center gap-2">
           {/* Speed indicator */}
-          <SpeedIndicator speedLimit={speedLimit} onSpeedLimitChange={handleSpeedLimitChange} />
+          <SpeedIndicator speedLimit={speedLimit} onSpeedLimitChange={handleSpeedLimitChange} queue={transfers} />
 
           {/* Max concurrent dropdown */}
           <div className="flex items-center gap-1 text-[11px] text-[#71717a]">

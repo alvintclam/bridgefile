@@ -86,10 +86,17 @@ export function createRateLimitedTransform(
         ? chunk.length
         : Buffer.byteLength(String(chunk));
 
-      const scheduled = scheduleChain.then(async () => {
-        await scheduleChunk(chunkBytes, () => this.destroyed);
-      });
+      // Fast path: no rate limit + not paused → skip scheduling entirely
+      if (!transferPaused && (speedLimitMbps == null || speedLimitMbps <= 0)) {
+        onChunk?.(chunkBytes);
+        callback(null, chunk);
+        return;
+      }
 
+      // Serialize through scheduleChain only when rate-limiting/pausing
+      const scheduled = scheduleChain.then(() =>
+        scheduleChunk(chunkBytes, () => this.destroyed),
+      );
       scheduleChain = scheduled.catch(() => {});
 
       scheduled
@@ -97,9 +104,7 @@ export function createRateLimitedTransform(
           onChunk?.(chunkBytes);
           callback(null, chunk);
         })
-        .catch((error) => {
-          callback(error as Error);
-        });
+        .catch((error) => callback(error as Error));
     },
   });
 }

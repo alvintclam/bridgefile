@@ -16,6 +16,13 @@ function isExternalDropItem(
   return item !== null;
 }
 
+export interface ClipboardEntry {
+  side: 'local' | 'remote';
+  path: string;
+  files: { name: string; isDirectory: boolean }[];
+  cut: boolean;
+}
+
 interface FilePaneProps {
   side: 'local' | 'remote';
   label: string;
@@ -32,6 +39,9 @@ interface FilePaneProps {
     sourcePath: string,
   ) => Promise<void>;
   onDesktopDrop?: (items: ExternalDropItem[], targetPath: string) => Promise<void>;
+  /** Clipboard integration (cross-pane copy/paste) */
+  clipboard?: ClipboardEntry | null;
+  onSetClipboard?: (entry: ClipboardEntry | null) => void;
   /** Dialog callbacks */
   onCompare?: () => void;
   onSearch?: () => void;
@@ -83,6 +93,8 @@ export default function FilePane({
   refreshToken = 0,
   onTransfer,
   onDesktopDrop,
+  clipboard,
+  onSetClipboard,
   onCompare,
   onSearch,
   onEditFile,
@@ -335,17 +347,17 @@ export default function FilePane({
   }, []);
 
   const handleOverwriteResponse = useCallback((action: OverwriteAction, applyToAll: boolean) => {
-    if (overwriteDialog.resolve) {
-      overwriteDialog.resolve({ action, applyToAll });
-    }
-    setOverwriteDialog({
-      visible: false,
-      fileName: '',
-      action: 'overwrite',
-      applyToAll: false,
-      resolve: null,
+    setOverwriteDialog((prev) => {
+      prev.resolve?.({ action, applyToAll });
+      return {
+        visible: false,
+        fileName: '',
+        action: 'overwrite',
+        applyToAll: false,
+        resolve: null,
+      };
     });
-  }, [overwriteDialog.resolve]);
+  }, []);
 
   const getActionFiles = useCallback((preferredFile?: FileEntry): FileEntry[] => {
     if (preferredFile && selected.has(preferredFile.name)) {
@@ -562,6 +574,38 @@ export default function FilePane({
         return;
       }
 
+      // Ctrl/Cmd+C: copy selected files into cross-pane clipboard
+      if (isMod && e.key === 'c' && selected.size > 0 && onSetClipboard) {
+        e.preventDefault();
+        const files = sortedFiles
+          .filter((f) => selected.has(f.name))
+          .map((f) => ({ name: f.name, isDirectory: f.isDirectory }));
+        onSetClipboard({ side, path: currentPath, files, cut: false });
+        return;
+      }
+
+      // Ctrl/Cmd+X: cut (copy + mark for move)
+      if (isMod && e.key === 'x' && selected.size > 0 && onSetClipboard) {
+        e.preventDefault();
+        const files = sortedFiles
+          .filter((f) => selected.has(f.name))
+          .map((f) => ({ name: f.name, isDirectory: f.isDirectory }));
+        onSetClipboard({ side, path: currentPath, files, cut: true });
+        return;
+      }
+
+      // Ctrl/Cmd+V: paste — if clipboard is from opposite side, trigger transfer
+      if (isMod && e.key === 'v' && clipboard && onTransfer && clipboard.side !== side) {
+        e.preventDefault();
+        const direction = side === 'remote' ? 'upload' : 'download';
+        onTransfer(direction, clipboard.files, clipboard.path).catch(() => {});
+        // Clear clipboard after cut-paste
+        if (clipboard.cut && onSetClipboard) {
+          onSetClipboard(null);
+        }
+        return;
+      }
+
       // Enter: open selected folder / download selected file
       if (e.key === 'Enter' && selected.size > 0) {
         e.preventDefault();
@@ -612,7 +656,7 @@ export default function FilePane({
 
     container.addEventListener('keydown', handleKeyDown);
     return () => container.removeEventListener('keydown', handleKeyDown);
-  }, [selected, sortedFiles, deleteFiles, refresh, handleGoUp, requestTransfer]);
+  }, [selected, sortedFiles, deleteFiles, refresh, handleGoUp, requestTransfer, clipboard, onSetClipboard, onTransfer, side, currentPath]);
 
   const breadcrumbs = currentPath === '/'
     ? ['/']

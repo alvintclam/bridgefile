@@ -2,14 +2,19 @@ import React, { useState, useEffect, useRef, useCallback } from 'react';
 
 export type SpeedLimit = 'unlimited' | 1 | 5 | 10 | number;
 
+interface QueueItem {
+  status: string;
+  entryType?: string;
+  direction?: string;
+  transferred: number;
+}
+
 interface SpeedIndicatorProps {
   /** Current speed limit in MB/s, or 'unlimited' */
   speedLimit: SpeedLimit;
   onSpeedLimitChange: (limit: SpeedLimit) => void;
-}
-
-function isElectron(): boolean {
-  return typeof window !== 'undefined' && typeof window.bridgefile !== 'undefined';
+  /** Transfer queue data (passed down to avoid independent polling) */
+  queue?: QueueItem[];
 }
 
 function formatSpeed(bytesPerSec: number): string {
@@ -19,7 +24,7 @@ function formatSpeed(bytesPerSec: number): string {
   return `${(bytesPerSec / (1024 * 1024)).toFixed(2)} MB/s`;
 }
 
-export default function SpeedIndicator({ speedLimit, onSpeedLimitChange }: SpeedIndicatorProps) {
+export default function SpeedIndicator({ speedLimit, onSpeedLimitChange, queue }: SpeedIndicatorProps) {
   const [uploadSpeed, setUploadSpeed] = useState(0);
   const [downloadSpeed, setDownloadSpeed] = useState(0);
   const [showDropdown, setShowDropdown] = useState(false);
@@ -31,52 +36,34 @@ export default function SpeedIndicator({ speedLimit, onSpeedLimitChange }: Speed
     time: Date.now(),
   });
 
-  // Poll transfer queue every 500ms to compute speeds
+  // Recompute speeds when parent-provided queue updates
   useEffect(() => {
-    const poll = async () => {
-      if (!isElectron()) {
-        setUploadSpeed(0);
-        setDownloadSpeed(0);
-        return;
+    if (!queue) {
+      setUploadSpeed(0);
+      setDownloadSpeed(0);
+      return;
+    }
+
+    const now = Date.now();
+    const elapsed = (now - prevTransferred.current.time) / 1000;
+    if (elapsed <= 0) return;
+
+    let totalUpload = 0;
+    let totalDownload = 0;
+    for (const t of queue) {
+      if (t.status === 'in-progress' && t.entryType !== 'directory') {
+        if (t.direction === 'upload') totalUpload += t.transferred;
+        else totalDownload += t.transferred;
       }
+    }
 
-      try {
-        const queue = await window.bridgefile.transfer.getQueue();
-        const now = Date.now();
-        const elapsed = (now - prevTransferred.current.time) / 1000;
+    const upDelta = totalUpload - prevTransferred.current.upload;
+    const downDelta = totalDownload - prevTransferred.current.download;
+    if (upDelta >= 0) setUploadSpeed(upDelta / elapsed);
+    if (downDelta >= 0) setDownloadSpeed(downDelta / elapsed);
 
-        if (elapsed > 0) {
-          let totalUpload = 0;
-          let totalDownload = 0;
-
-          for (const t of queue) {
-            if (t.status === 'in-progress' && t.entryType !== 'directory') {
-              if (t.direction === 'upload') {
-                totalUpload += t.transferred;
-              } else {
-                totalDownload += t.transferred;
-              }
-            }
-          }
-
-          const upDelta = totalUpload - prevTransferred.current.upload;
-          const downDelta = totalDownload - prevTransferred.current.download;
-
-          // Only set positive deltas (negative means transfers completed/restarted)
-          if (upDelta >= 0) setUploadSpeed(upDelta / elapsed);
-          if (downDelta >= 0) setDownloadSpeed(downDelta / elapsed);
-
-          prevTransferred.current = { upload: totalUpload, download: totalDownload, time: now };
-        }
-      } catch {
-        // Ignore polling errors
-      }
-    };
-
-    const interval = setInterval(poll, 500);
-    poll();
-    return () => clearInterval(interval);
-  }, []);
+    prevTransferred.current = { upload: totalUpload, download: totalDownload, time: now };
+  }, [queue]);
 
   // Close dropdown on click outside
   useEffect(() => {

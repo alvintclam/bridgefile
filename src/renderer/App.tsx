@@ -4,7 +4,7 @@ import ConnectionManager from './components/ConnectionManager';
 import type { ConnectionProfile } from './components/ConnectionManager';
 import BookmarkBar from './components/BookmarkBar';
 import FilePane from './components/FilePane';
-import type { ExternalDropItem } from './components/FilePane';
+import type { ExternalDropItem, ClipboardEntry } from './components/FilePane';
 import TransferQueue from './components/TransferQueue';
 import LogPanel, { logConnected, logDisconnected, logError } from './components/LogPanel';
 import TabBar from './components/TabBar';
@@ -18,6 +18,28 @@ import OverwriteConfirmDialog from './components/OverwriteConfirmDialog';
 import type { OverwriteAction, OverwriteDialogRequest, FileInfo } from './components/OverwriteConfirmDialog';
 import { emptyOverwriteRequest } from './components/OverwriteConfirmDialog';
 import { addLog } from './components/LogPanel';
+import PreferencesDialog, { defaultPreferences } from './components/PreferencesDialog';
+import type { Preferences } from './components/PreferencesDialog';
+
+const PREFERENCES_STORAGE_KEY = 'bridgefile.preferences';
+
+function loadPreferences(): Preferences {
+  try {
+    const raw = localStorage.getItem(PREFERENCES_STORAGE_KEY);
+    if (!raw) return defaultPreferences;
+    return { ...defaultPreferences, ...JSON.parse(raw) };
+  } catch {
+    return defaultPreferences;
+  }
+}
+
+function savePreferences(prefs: Preferences): void {
+  try {
+    localStorage.setItem(PREFERENCES_STORAGE_KEY, JSON.stringify(prefs));
+  } catch {
+    // ignore
+  }
+}
 
 type BottomTab = 'transfers' | 'log';
 
@@ -157,7 +179,7 @@ export default function App() {
   const [syncRoots, setSyncRoots] = useState<SyncRoots | null>(null);
 
   // ── UI state ────────────────────────────────────────────────
-  const [theme, setTheme] = useState<'dark' | 'light'>('dark');
+  const [theme, setTheme] = useState<'dark' | 'light'>(() => loadPreferences().theme);
   const [showConnectionManager, setShowConnectionManager] = useState(false);
   const [bottomTab, setBottomTab] = useState<BottomTab>('transfers');
   const [bottomCollapsed, setBottomCollapsed] = useState(false);
@@ -166,6 +188,15 @@ export default function App() {
 
   // ── Overwrite dialog state ──────────────────────────────────
   const [overwriteRequest, setOverwriteRequest] = useState<OverwriteDialogRequest>(emptyOverwriteRequest);
+  const [clipboard, setClipboard] = useState<ClipboardEntry | null>(null);
+  const [preferences, setPreferences] = useState<Preferences>(() => loadPreferences());
+  const [showPreferences, setShowPreferences] = useState(false);
+
+  const handleSavePreferences = useCallback((next: Preferences) => {
+    setPreferences(next);
+    savePreferences(next);
+    setTheme(next.theme);
+  }, []);
 
   // ── Dialog state ──────────────────────────────────────────────
   const [showCompare, setShowCompare] = useState(false);
@@ -350,7 +381,15 @@ export default function App() {
   }, [bottomCollapsed]);
 
   const toggleTheme = () => {
-    setTheme((prev) => (prev === 'dark' ? 'light' : 'dark'));
+    setTheme((prev) => {
+      const next: 'dark' | 'light' = prev === 'dark' ? 'light' : 'dark';
+      setPreferences((p): Preferences => {
+        const updated: Preferences = { ...p, theme: next };
+        savePreferences(updated);
+        return updated;
+      });
+      return next;
+    });
   };
 
   // Derive the lowercase protocol for the remote pane
@@ -482,12 +521,12 @@ export default function App() {
 
   const handleOverwriteResponse = useCallback(
     (action: OverwriteAction, applyToAll: boolean) => {
-      if (overwriteRequest.resolve) {
-        overwriteRequest.resolve({ action, applyToAll });
-      }
-      setOverwriteRequest(emptyOverwriteRequest);
+      setOverwriteRequest((prev) => {
+        prev.resolve?.({ action, applyToAll });
+        return emptyOverwriteRequest;
+      });
     },
-    [overwriteRequest.resolve],
+    [],
   );
 
   const toFileInfo = (entry: { name: string; size: number; modifiedAt: number } | null): FileInfo | null => {
@@ -762,7 +801,7 @@ export default function App() {
         remotePath={remotePath}
         onConnectClick={() => setShowConnectionManager(true)}
         onDisconnect={handleDisconnect}
-        onSettingsClick={() => {}}
+        onSettingsClick={() => setShowPreferences(true)}
         theme={theme}
         onToggleTheme={toggleTheme}
         syncBrowsing={syncBrowsing}
@@ -797,6 +836,8 @@ export default function App() {
             syncPath={localPath ?? undefined}
             refreshToken={localRefreshToken}
             onTransfer={handleTransfer}
+            clipboard={clipboard}
+            onSetClipboard={setClipboard}
             onCompare={() => setShowCompare(true)}
             onSearch={() => setShowSearch(true)}
             onEditFile={(file) => {
@@ -837,6 +878,8 @@ export default function App() {
             refreshToken={remoteRefreshToken}
             onTransfer={handleTransfer}
             onDesktopDrop={handleDesktopDrop}
+            clipboard={clipboard}
+            onSetClipboard={setClipboard}
             onCompare={() => setShowCompare(true)}
             onSearch={() => setShowSearch(true)}
             onEditFile={(file) => {
@@ -1021,6 +1064,14 @@ export default function App() {
           onResponse={handleOverwriteResponse}
         />
       )}
+
+      {/* Preferences dialog */}
+      <PreferencesDialog
+        isOpen={showPreferences}
+        onClose={() => setShowPreferences(false)}
+        preferences={preferences}
+        onSave={handleSavePreferences}
+      />
     </div>
   );
 }
