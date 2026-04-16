@@ -5,6 +5,7 @@ out/
 release/
 .env
 .env.local
+.env.*.local
 *.log
 .DS_Store
 Thumbs.db
@@ -13,3 +14,10 @@ Thumbs.db
 *.AppImage
 *.deb
 *.snap
+.playwright-mcp/
+.vscode/
+.idea/
+*.pdb
+*.dsym
+coverage/
+*.tsbuildinfo

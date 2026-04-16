@@ -20,6 +20,9 @@ import { emptyOverwriteRequest } from './components/OverwriteConfirmDialog';
 import { addLog } from './components/LogPanel';
 import PreferencesDialog, { defaultPreferences } from './components/PreferencesDialog';
 import type { Preferences } from './components/PreferencesDialog';
+import ShortcutsHelp from './components/ShortcutsHelp';
+import AboutDialog from './components/AboutDialog';
+import WelcomeScreen from './components/WelcomeScreen';
 
 const PREFERENCES_STORAGE_KEY = 'bridgefile.preferences';
 
@@ -164,6 +167,39 @@ export default function App() {
     return () => clearTimeout(timer);
   }, []);
 
+  // Check if user has existing connections (for welcome screen)
+  useEffect(() => {
+    if (typeof window === 'undefined' || !window.bridgefile) {
+      setHasConnectedBefore(true); // assume yes if not in Electron
+      return;
+    }
+    window.bridgefile.connections
+      .getAll()
+      .then((profiles: unknown[]) => setHasConnectedBefore(profiles.length > 0))
+      .catch(() => setHasConnectedBefore(true));
+  }, []);
+
+  // Global keyboard shortcuts: Cmd/Ctrl+, for prefs, Cmd/Ctrl+/ for shortcuts help
+  useEffect(() => {
+    const handler = (e: KeyboardEvent) => {
+      const target = e.target as HTMLElement;
+      if (target.tagName === 'INPUT' || target.tagName === 'TEXTAREA' || target.isContentEditable) return;
+      const isMod = e.ctrlKey || e.metaKey;
+      if (isMod && e.key === ',') {
+        e.preventDefault();
+        setShowPreferences(true);
+      } else if (isMod && (e.key === '/' || e.key === '?')) {
+        e.preventDefault();
+        setShowShortcuts(true);
+      } else if (e.key === 'Escape') {
+        setShowShortcuts(false);
+        setShowAbout(false);
+      }
+    };
+    window.addEventListener('keydown', handler);
+    return () => window.removeEventListener('keydown', handler);
+  }, []);
+
   useEffect(() => {
     if (typeof window === 'undefined' || !window.bridgefile) return;
 
@@ -191,6 +227,9 @@ export default function App() {
   const [clipboard, setClipboard] = useState<ClipboardEntry | null>(null);
   const [preferences, setPreferences] = useState<Preferences>(() => loadPreferences());
   const [showPreferences, setShowPreferences] = useState(false);
+  const [showShortcuts, setShowShortcuts] = useState(false);
+  const [showAbout, setShowAbout] = useState(false);
+  const [hasConnectedBefore, setHasConnectedBefore] = useState<boolean | null>(null);
 
   const handleSavePreferences = useCallback((next: Preferences) => {
     setPreferences(next);
@@ -838,6 +877,7 @@ export default function App() {
             onTransfer={handleTransfer}
             clipboard={clipboard}
             onSetClipboard={setClipboard}
+            showHidden={preferences.showHiddenFiles}
             onCompare={() => setShowCompare(true)}
             onSearch={() => setShowSearch(true)}
             onEditFile={(file) => {
@@ -880,6 +920,7 @@ export default function App() {
             onDesktopDrop={handleDesktopDrop}
             clipboard={clipboard}
             onSetClipboard={setClipboard}
+            showHidden={preferences.showHiddenFiles}
             onCompare={() => setShowCompare(true)}
             onSearch={() => setShowSearch(true)}
             onEditFile={(file) => {
@@ -1072,6 +1113,12 @@ export default function App() {
         preferences={preferences}
         onSave={handleSavePreferences}
       />
+
+      {/* Keyboard shortcuts help */}
+      <ShortcutsHelp isOpen={showShortcuts} onClose={() => setShowShortcuts(false)} />
+
+      {/* About dialog */}
+      <AboutDialog isOpen={showAbout} onClose={() => setShowAbout(false)} />
     </div>
   );
 }

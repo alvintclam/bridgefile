@@ -42,6 +42,8 @@ interface FilePaneProps {
   /** Clipboard integration (cross-pane copy/paste) */
   clipboard?: ClipboardEntry | null;
   onSetClipboard?: (entry: ClipboardEntry | null) => void;
+  /** Show hidden files (dotfiles) in local/remote panes */
+  showHidden?: boolean;
   /** Dialog callbacks */
   onCompare?: () => void;
   onSearch?: () => void;
@@ -95,13 +97,14 @@ export default function FilePane({
   onDesktopDrop,
   clipboard,
   onSetClipboard,
+  showHidden,
   onCompare,
   onSearch,
   onEditFile,
   onChecksum,
   onPermissions,
 }: FilePaneProps) {
-  const params: FileOperationsParams = { side, protocol, connectionId };
+  const params: FileOperationsParams = { side, protocol, connectionId, showHidden };
   const ops = useFileOperations(params);
   const {
     files,
@@ -114,14 +117,44 @@ export default function FilePane({
     refresh,
   } = ops;
 
+  // Path history for Alt+Left / Alt+Right navigation
+  const historyBack = useRef<string[]>([]);
+  const historyForward = useRef<string[]>([]);
+  const isHistoryNavRef = useRef(false);
+
   // Wrap navigate to also call onNavigate for synchronized browsing
   const navigate = useCallback(
     (path: string) => {
+      if (!isHistoryNavRef.current && currentPath && currentPath !== path) {
+        historyBack.current.push(currentPath);
+        // Cap history length to prevent unbounded growth
+        if (historyBack.current.length > 100) historyBack.current.shift();
+        historyForward.current = [];
+      }
+      isHistoryNavRef.current = false;
       rawNavigate(path);
       onNavigate?.(path);
     },
-    [rawNavigate, onNavigate],
+    [rawNavigate, onNavigate, currentPath],
   );
+
+  const navigateBack = useCallback(() => {
+    const prev = historyBack.current.pop();
+    if (!prev) return;
+    historyForward.current.push(currentPath);
+    isHistoryNavRef.current = true;
+    rawNavigate(prev);
+    onNavigate?.(prev);
+  }, [rawNavigate, onNavigate, currentPath]);
+
+  const navigateForward = useCallback(() => {
+    const next = historyForward.current.pop();
+    if (!next) return;
+    historyBack.current.push(currentPath);
+    isHistoryNavRef.current = true;
+    rawNavigate(next);
+    onNavigate?.(next);
+  }, [rawNavigate, onNavigate, currentPath]);
 
   const [sortField, setSortField] = useState<SortField>('name');
   const [sortDir, setSortDir] = useState<SortDirection>('asc');
@@ -574,6 +607,20 @@ export default function FilePane({
         return;
       }
 
+      // Alt+Left: history back
+      if (e.altKey && e.key === 'ArrowLeft') {
+        e.preventDefault();
+        navigateBack();
+        return;
+      }
+
+      // Alt+Right: history forward
+      if (e.altKey && e.key === 'ArrowRight') {
+        e.preventDefault();
+        navigateForward();
+        return;
+      }
+
       // Ctrl/Cmd+C: copy selected files into cross-pane clipboard
       if (isMod && e.key === 'c' && selected.size > 0 && onSetClipboard) {
         e.preventDefault();
@@ -656,7 +703,7 @@ export default function FilePane({
 
     container.addEventListener('keydown', handleKeyDown);
     return () => container.removeEventListener('keydown', handleKeyDown);
-  }, [selected, sortedFiles, deleteFiles, refresh, handleGoUp, requestTransfer, clipboard, onSetClipboard, onTransfer, side, currentPath]);
+  }, [selected, sortedFiles, deleteFiles, refresh, handleGoUp, requestTransfer, clipboard, onSetClipboard, onTransfer, side, currentPath, navigateBack, navigateForward]);
 
   const breadcrumbs = currentPath === '/'
     ? ['/']

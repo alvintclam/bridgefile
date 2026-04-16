@@ -82,7 +82,7 @@ export interface BridgeFileAPI {
   };
 
   fs: {
-    listLocal(dirPath: string): Promise<FileEntry[]>;
+    listLocal(dirPath: string, showHidden?: boolean): Promise<FileEntry[]>;
     getHomeDir(): Promise<string>;
     mkdir(dirPath: string): Promise<void>;
     rename(oldPath: string, newPath: string): Promise<void>;

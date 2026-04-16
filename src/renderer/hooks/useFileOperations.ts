@@ -12,6 +12,7 @@ export interface FileOperationsParams {
   side: 'local' | 'remote';
   protocol?: 'sftp' | 's3' | 'ftp';
   connectionId?: string;
+  showHidden?: boolean;
 }
 
 export interface FileOperations {
@@ -71,16 +72,16 @@ export function joinPath(base: string, name: string, side: 'local' | 'remote' = 
 // ── Hook ────────────────────────────────────────────────────────
 
 export function useFileOperations(params: FileOperationsParams): FileOperations {
-  const { side, protocol, connectionId } = params;
+  const { side, protocol, connectionId, showHidden } = params;
 
   const [currentPath, setCurrentPath] = useState('/');
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState<string | null>(!isElectron() ? 'Desktop app required' : null);
   const [files, setFiles] = useState<FileEntry[]>([]);
 
-  // Keep a ref to the latest connectionId / protocol to avoid stale closures
-  const connRef = useRef({ connectionId, protocol });
-  connRef.current = { connectionId, protocol };
+  // Keep a ref to latest connectionId / protocol / showHidden to avoid stale closures
+  const connRef = useRef({ connectionId, protocol, showHidden });
+  connRef.current = { connectionId, protocol, showHidden };
 
   // ── List files via IPC ──────────────────────────────────────
 
@@ -90,7 +91,7 @@ export function useFileOperations(params: FileOperationsParams): FileOperations 
       setError(null);
 
       if (side === 'local') {
-        const rawEntries = await window.bridgefile.fs.listLocal(path);
+        const rawEntries = await window.bridgefile.fs.listLocal(path, connRef.current.showHidden);
         setFiles(rawEntries.map(toRendererEntry));
       } else {
         const { connectionId: cid, protocol: proto } = connRef.current;
@@ -145,6 +146,15 @@ export function useFileOperations(params: FileOperationsParams): FileOperations 
     }
     prevConnId.current = connectionId;
   }, [connectionId, side, loadFiles]);
+
+  // Refresh when showHidden toggle changes
+  const prevShowHidden = useRef(showHidden);
+  useEffect(() => {
+    if (prevShowHidden.current !== showHidden && side === 'local' && currentPath) {
+      loadFiles(currentPath);
+    }
+    prevShowHidden.current = showHidden;
+  }, [showHidden, side, currentPath, loadFiles]);
 
   // ── navigate ────────────────────────────────────────────────
 

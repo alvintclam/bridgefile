@@ -120,7 +120,7 @@ const api = {
 
   // ── Local filesystem ───────────────────────────────────────
   fs: {
-    listLocal: (dirPath: string) => ipcRenderer.invoke('fs:listLocal', dirPath),
+    listLocal: (dirPath: string, showHidden?: boolean) => ipcRenderer.invoke('fs:listLocal', dirPath, showHidden),
     getHomeDir: () => ipcRenderer.invoke('fs:getHomeDir'),
     mkdir: (dirPath: string) => ipcRenderer.invoke('fs:mkdir', dirPath),
     rename: (oldPath: string, newPath: string) =>

@@ -928,14 +928,14 @@ export function registerIPCHandlers(): void {
 
   // ── Local filesystem ───────────────────────────────────────
 
-  ipcMain.handle('fs:listLocal', async (_event, dirPath: string) => {
+  ipcMain.handle('fs:listLocal', async (_event, dirPath: string, showHidden?: boolean) => {
     validateLocalPath(dirPath);
     const entries = fs.readdirSync(dirPath, { withFileTypes: true });
     const result: FileEntry[] = [];
 
     for (const entry of entries) {
-      // Skip hidden files on Unix
-      if (entry.name.startsWith('.')) continue;
+      // Skip hidden files (dotfiles) unless explicitly shown
+      if (!showHidden && entry.name.startsWith('.')) continue;
 
       const fullPath = path.join(dirPath, entry.name);
       try {

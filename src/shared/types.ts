@@ -194,7 +194,7 @@ export interface IPCChannels {
   'transfer:clearFinished': () => void;
 
   // Local filesystem
-  'fs:listLocal': (dirPath: string) => FileEntry[];
+  'fs:listLocal': (dirPath: string, showHidden?: boolean) => FileEntry[];
   'fs:getHomeDir': () => string;
   'fs:mkdir': (dirPath: string) => void;
   'fs:rename': (oldPath: string, newPath: string) => void;
