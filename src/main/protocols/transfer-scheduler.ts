@@ -25,15 +25,19 @@ export function canStartTransfer(
     return false;
   }
 
-  if (item.protocol === 'ftp') {
-    return !hasRunningTransferForConnection(
-      queue,
-      runningTransferIds,
-      item.protocol,
-      item.connectionId,
-      item.id,
-    );
-  }
-
+  // FTP now uses a session pool (src/main/protocols/ftp.ts) so parallel
+  // transfers on one connection are supported up to the pool's session limit.
+  // The pool itself enforces per-client serialization; no scheduler gate needed.
   return true;
+}
+
+/** @deprecated retained for the transfer-scheduler test suite */
+export function _hasRunningTransferForConnection(
+  queue: TransferItem[],
+  runningTransferIds: ReadonlySet<string>,
+  protocol: TransferItem['protocol'],
+  connectionId: string,
+  excludeTransferId?: string,
+): boolean {
+  return hasRunningTransferForConnection(queue, runningTransferIds, protocol, connectionId, excludeTransferId);
 }

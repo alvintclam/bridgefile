@@ -1043,7 +1043,12 @@ export function registerIPCHandlers(): void {
 
   ipcMain.handle('fs:stat', async (_event, targetPath: string) => {
     validateLocalPath(targetPath);
-    return statLocalEntry(targetPath);
+    try {
+      return await statLocalEntry(targetPath);
+    } catch (err) {
+      if (isEnoentError(err)) return null;
+      throw err;
+    }
   });
 
   // ── Bookmarks ─────────────────────────────────────────────

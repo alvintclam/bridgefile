@@ -89,7 +89,7 @@ export interface BridgeFileAPI {
     delete(targetPath: string): Promise<void>;
     readTextFile(filePath: string): Promise<string>;
     writeTextFile(filePath: string, content: string): Promise<void>;
-    stat(targetPath: string): Promise<FileEntry>;
+    stat(targetPath: string): Promise<FileEntry | null>;
   };
 
   bookmarks: {

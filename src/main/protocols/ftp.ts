@@ -6,77 +6,126 @@ import type { FTPConfig, FileEntry } from '../../shared/types';
 import { bindAbort, createAbortError, throwIfAborted } from './transfer-abort';
 import { createRateLimitedTransform } from './transfer-rate-limit';
 
-// ── Connection mutex (basic-ftp allows only one command at a time) ──
+// ── Connection session pool ────────────────────────────────────
+// basic-ftp allows only one command at a time per client, so we maintain
+// a pool of up to MAX_SESSIONS clients per logical connection ID.
+// Concurrent ops check out an idle client (or spawn a new one up to the
+// limit, or wait). This is what makes `maxConcurrent` work for FTP.
 
-const connectionMutex = new Map<string, Promise<void>>();
+const MAX_SESSIONS_PER_CONN = 4;
+const IDLE_TIMEOUT_MS = 5 * 60 * 1000; // 5 minutes
 
-function withMutex<T>(connId: string, fn: () => Promise<T>): Promise<T> {
-  const prev = connectionMutex.get(connId) ?? Promise.resolve();
-  const next = prev.then(fn, fn); // run fn after previous completes (even if it failed)
-  // Store the chain but don't propagate errors to the next waiter
-  connectionMutex.set(connId, next.then(() => {}, () => {}));
-  return next;
+interface FTPSession {
+  client: FTPClient;
+  busy: boolean;
 }
 
-// ── Connection pool ────────────────────────────────────────────
-
-interface PooledFTP {
-  id: string;
-  client: FTPClient;
+interface FTPConnPool {
   config: FTPConfig;
   rootDir: string;
+  sessions: FTPSession[];
+  waiters: Array<(s: FTPSession) => void>;
   lastActivity: number;
 }
 
-const pool = new Map<string, PooledFTP>();
+interface FTPContext {
+  client: FTPClient;
+  rootDir: string;
+}
 
-const IDLE_TIMEOUT_MS = 5 * 60 * 1000; // 5 minutes
+const pools = new Map<string, FTPConnPool>();
 
 // Prune idle connections periodically
 setInterval(() => {
   const now = Date.now();
-  for (const [id, conn] of pool) {
-    if (now - conn.lastActivity > IDLE_TIMEOUT_MS) {
-      conn.client.close();
-      pool.delete(id);
+  for (const [id, p] of pools) {
+    if (now - p.lastActivity > IDLE_TIMEOUT_MS) {
+      for (const s of p.sessions) {
+        try { s.client.close(); } catch { /* ignore */ }
+      }
+      pools.delete(id);
     }
   }
 }, 60_000);
 
-function touch(connId: string): void {
-  const conn = pool.get(connId);
-  if (conn) conn.lastActivity = Date.now();
+async function openClient(config: FTPConfig): Promise<FTPClient> {
+  const client = new FTPClient((config.timeout ?? 30) * 1000);
+  client.ftp.verbose = false;
+  await client.access({
+    host: config.host,
+    port: config.port ?? 21,
+    user: config.username,
+    password: config.password,
+    secure: config.secure ?? false,
+    secureOptions: config.secureOptions,
+  });
+  await client.useDefaultSettings();
+  return client;
 }
 
-function getConn(connId: string): PooledFTP {
-  const conn = pool.get(connId);
-  if (!conn) throw new Error(`FTP connection "${connId}" not found or expired`);
-  touch(connId);
-  return conn;
+async function acquireSession(connId: string): Promise<FTPSession> {
+  const p = pools.get(connId);
+  if (!p) throw new Error(`FTP connection "${connId}" not found or expired`);
+  p.lastActivity = Date.now();
+
+  const idle = p.sessions.find((s) => !s.busy);
+  if (idle) {
+    idle.busy = true;
+    return idle;
+  }
+
+  if (p.sessions.length < MAX_SESSIONS_PER_CONN) {
+    const client = await openClient(p.config);
+    const session: FTPSession = { client, busy: true };
+    p.sessions.push(session);
+    return session;
+  }
+
+  return new Promise<FTPSession>((resolve) => {
+    p.waiters.push((s) => {
+      s.busy = true;
+      resolve(s);
+    });
+  });
+}
+
+function releaseSession(connId: string, session: FTPSession): void {
+  const p = pools.get(connId);
+  if (!p) {
+    try { session.client.close(); } catch { /* ignore */ }
+    return;
+  }
+  p.lastActivity = Date.now();
+  session.busy = false;
+  const waiter = p.waiters.shift();
+  if (waiter) waiter(session);
+}
+
+async function withSession<T>(
+  connId: string,
+  fn: (ctx: FTPContext) => Promise<T>,
+): Promise<T> {
+  const p = pools.get(connId);
+  if (!p) throw new Error(`FTP connection "${connId}" not found or expired`);
+  const session = await acquireSession(connId);
+  try {
+    return await fn({ client: session.client, rootDir: p.rootDir });
+  } finally {
+    releaseSession(connId, session);
+  }
 }
 
 // ── Public API ─────────────────────────────────────────────────
 
 export async function connect(config: FTPConfig): Promise<string> {
   const id = crypto.randomUUID();
-  const client = new FTPClient((config.timeout ?? 30) * 1000);
-  client.ftp.verbose = false;
+  let client: FTPClient;
   let rootDir = '/';
 
   try {
-    await client.access({
-      host: config.host,
-      port: config.port ?? 21,
-      user: config.username,
-      password: config.password,
-      secure: config.secure ?? false,
-      secureOptions: config.secureOptions,
-    });
-    await client.useDefaultSettings();
+    client = await openClient(config);
     rootDir = normalizeAbsolutePath(await client.pwd());
   } catch (err: any) {
-    client.close();
-
     const msg = err.message ?? String(err);
 
     if (msg.includes('ECONNREFUSED')) {
@@ -98,11 +147,11 @@ export async function connect(config: FTPConfig): Promise<string> {
     throw new Error(`FTP connection failed: ${msg}`);
   }
 
-  pool.set(id, {
-    id,
-    client,
+  pools.set(id, {
     config,
     rootDir,
+    sessions: [{ client, busy: false }],
+    waiters: [],
     lastActivity: Date.now(),
   });
 
@@ -110,21 +159,22 @@ export async function connect(config: FTPConfig): Promise<string> {
 }
 
 export async function disconnect(connId: string): Promise<void> {
-  const conn = pool.get(connId);
-  if (conn) {
-    conn.client.close();
-    pool.delete(connId);
+  const p = pools.get(connId);
+  if (p) {
+    for (const s of p.sessions) {
+      try { s.client.close(); } catch { /* ignore */ }
+    }
+    pools.delete(connId);
   }
 }
 
 export function list(connId: string, dirPath: string): Promise<FileEntry[]> {
-  return withMutex(connId, () => listImpl(connId, dirPath));
+  return withSession(connId, (ctx) => listImpl(ctx, dirPath));
 }
 
-async function listImpl(connId: string, dirPath: string): Promise<FileEntry[]> {
-  const conn = getConn(connId);
+async function listImpl(ctx: FTPContext, dirPath: string): Promise<FileEntry[]> {
   const normalizedDirPath = normalizeAbsolutePath(dirPath);
-  const entries = await listDirectory(conn, normalizedDirPath);
+  const entries = await listDirectory(ctx, normalizedDirPath);
 
   const result: FileEntry[] = entries
     .filter((entry) => entry.name !== '.' && entry.name !== '..')
@@ -156,31 +206,30 @@ export function upload(
   onProgress?: (transferred: number, total: number) => void,
   signal?: AbortSignal,
 ): Promise<void> {
-  return withMutex(connId, async () => {
-  throwIfAborted(signal);
-  const conn = getConn(connId);
-  const remoteServerPath = resolveServerPath(conn, remotePath);
-  const total = fs.statSync(localPath).size;
-  let transferred = 0;
-  const readStream = fs.createReadStream(localPath, { highWaterMark: 256 * 1024 });
-  const throttle = createRateLimitedTransform((chunkBytes) => {
-    transferred += chunkBytes;
-    onProgress?.(transferred, total);
-  });
-  const cleanupAbort = bindAbort(signal, () => {
-    const abortError = createAbortError();
-    readStream.destroy(abortError);
-    throttle.destroy(abortError);
-  });
-  readStream.on('error', (error) => throttle.destroy(error));
-  readStream.pipe(throttle);
+  return withSession(connId, async (ctx) => {
+    throwIfAborted(signal);
+    const remoteServerPath = resolveServerPath(ctx, remotePath);
+    const total = fs.statSync(localPath).size;
+    let transferred = 0;
+    const readStream = fs.createReadStream(localPath, { highWaterMark: 256 * 1024 });
+    const throttle = createRateLimitedTransform((chunkBytes) => {
+      transferred += chunkBytes;
+      onProgress?.(transferred, total);
+    });
+    const cleanupAbort = bindAbort(signal, () => {
+      const abortError = createAbortError();
+      readStream.destroy(abortError);
+      throttle.destroy(abortError);
+    });
+    readStream.on('error', (error) => throttle.destroy(error));
+    readStream.pipe(throttle);
 
-  try {
-    await conn.client.uploadFrom(throttle, remoteServerPath);
-  } finally {
-    cleanupAbort();
-    readStream.destroy();
-  }
+    try {
+      await ctx.client.uploadFrom(throttle, remoteServerPath);
+    } finally {
+      cleanupAbort();
+      readStream.destroy();
+    }
   });
 }
 
@@ -191,20 +240,19 @@ export function download(
   onProgress?: (transferred: number, total: number) => void,
   signal?: AbortSignal,
 ): Promise<void> {
-  return withMutex(connId, () => downloadImpl(connId, remotePath, localPath, onProgress, signal));
+  return withSession(connId, (ctx) => downloadImpl(ctx, remotePath, localPath, onProgress, signal));
 }
 
 async function downloadImpl(
-  connId: string,
+  ctx: FTPContext,
   remotePath: string,
   localPath: string,
   onProgress?: (transferred: number, total: number) => void,
   signal?: AbortSignal,
 ): Promise<void> {
   throwIfAborted(signal);
-  const conn = getConn(connId);
-  const remoteServerPath = resolveServerPath(conn, remotePath);
-  const total = (await statImpl(connId, remotePath)).size;
+  const remoteServerPath = resolveServerPath(ctx, remotePath);
+  const total = (await statImpl(ctx, remotePath)).size;
   let transferred = 0;
   const throttle = createRateLimitedTransform((chunkBytes) => {
     transferred += chunkBytes;
@@ -228,7 +276,7 @@ async function downloadImpl(
   throttle.pipe(writeStream);
 
   try {
-    await conn.client.downloadTo(throttle, remoteServerPath);
+    await ctx.client.downloadTo(throttle, remoteServerPath);
     await streamClosed;
   } finally {
     cleanupAbort();
@@ -237,10 +285,9 @@ async function downloadImpl(
 }
 
 export function mkdir(connId: string, dirPath: string): Promise<void> {
-  return withMutex(connId, async () => {
-    const conn = getConn(connId);
-    await conn.client.ensureDir(resolveServerPath(conn, dirPath));
-    await resetWorkingDir(conn);
+  return withSession(connId, async (ctx) => {
+    await ctx.client.ensureDir(resolveServerPath(ctx, dirPath));
+    await resetWorkingDir(ctx);
   });
 }
 
@@ -249,17 +296,16 @@ export function rename(
   oldPath: string,
   newPath: string,
 ): Promise<void> {
-  return withMutex(connId, async () => {
-    const conn = getConn(connId);
-    await conn.client.rename(resolveServerPath(conn, oldPath), resolveServerPath(conn, newPath));
+  return withSession(connId, async (ctx) => {
+    await ctx.client.rename(resolveServerPath(ctx, oldPath), resolveServerPath(ctx, newPath));
   });
 }
 
 export function stat(connId: string, targetPath: string): Promise<FileEntry> {
-  return withMutex(connId, () => statImpl(connId, targetPath));
+  return withSession(connId, (ctx) => statImpl(ctx, targetPath));
 }
 
-async function statImpl(connId: string, targetPath: string): Promise<FileEntry> {
+async function statImpl(ctx: FTPContext, targetPath: string): Promise<FileEntry> {
   const normalizedTargetPath = normalizeAbsolutePath(targetPath);
 
   if (normalizedTargetPath === '/') {
@@ -275,7 +321,7 @@ async function statImpl(connId: string, targetPath: string): Promise<FileEntry> 
 
   const parentPath = normalizeAbsolutePath(path.posix.dirname(normalizedTargetPath));
   const baseName = path.posix.basename(normalizedTargetPath);
-  const entries = await listImpl(connId, parentPath);
+  const entries = await listImpl(ctx, parentPath);
   const entry = entries.find((candidate) => candidate.name === baseName);
 
   if (!entry) {
@@ -293,21 +339,20 @@ async function statImpl(connId: string, targetPath: string): Promise<FileEntry> 
 }
 
 export function del(connId: string, targetPath: string): Promise<void> {
-  return withMutex(connId, async () => {
-    const conn = getConn(connId);
-    const serverTargetPath = resolveServerPath(conn, targetPath);
+  return withSession(connId, async (ctx) => {
+    const serverTargetPath = resolveServerPath(ctx, targetPath);
 
     // Try to detect if target is a directory by listing it.
     // If list() succeeds, the path is a directory (listing a file throws).
     try {
-      await conn.client.list(serverTargetPath);
-      await conn.client.removeDir(serverTargetPath);
+      await ctx.client.list(serverTargetPath);
+      await ctx.client.removeDir(serverTargetPath);
       return;
     } catch {
       // list failed — it's a file (or doesn't exist)
     }
 
-    await conn.client.remove(serverTargetPath);
+    await ctx.client.remove(serverTargetPath);
   });
 }
 
@@ -321,32 +366,31 @@ export function resumeTransfer(
   onProgress?: (transferred: number, total: number) => void,
   signal?: AbortSignal,
 ): Promise<void> {
-  return withMutex(connId, () => {
+  return withSession(connId, (ctx) => {
     if (direction === 'upload') {
-      return resumeUpload(connId, localPath, remotePath, onProgress, signal);
+      return resumeUpload(ctx, localPath, remotePath, onProgress, signal);
     } else {
-      return resumeDownload(connId, remotePath, localPath, onProgress, signal);
+      return resumeDownload(ctx, remotePath, localPath, onProgress, signal);
     }
   });
 }
 
 async function resumeUpload(
-  connId: string,
+  ctx: FTPContext,
   localPath: string,
   remotePath: string,
   onProgress?: (transferred: number, total: number) => void,
   signal?: AbortSignal,
 ): Promise<void> {
   throwIfAborted(signal);
-  const conn = getConn(connId);
-  const remoteServerPath = resolveServerPath(conn, remotePath);
+  const remoteServerPath = resolveServerPath(ctx, remotePath);
   const fileStat = fs.statSync(localPath);
   const total = fileStat.size;
 
   // Check remote file size for resume
   let remoteSize = 0;
   try {
-    remoteSize = await conn.client.size(remoteServerPath);
+    remoteSize = await ctx.client.size(remoteServerPath);
   } catch {
     // File doesn't exist remotely — start from 0
   }
@@ -371,9 +415,9 @@ async function resumeUpload(
 
   try {
     if (remoteSize > 0) {
-      await conn.client.appendFrom(throttle, remoteServerPath);
+      await ctx.client.appendFrom(throttle, remoteServerPath);
     } else {
-      await conn.client.uploadFrom(throttle, remoteServerPath);
+      await ctx.client.uploadFrom(throttle, remoteServerPath);
     }
   } finally {
     cleanupAbort();
@@ -382,23 +426,22 @@ async function resumeUpload(
 }
 
 async function resumeDownload(
-  connId: string,
+  ctx: FTPContext,
   remotePath: string,
   localPath: string,
   onProgress?: (transferred: number, total: number) => void,
   signal?: AbortSignal,
 ): Promise<void> {
-  const conn = getConn(connId);
-  const remoteServerPath = resolveServerPath(conn, remotePath);
+  const remoteServerPath = resolveServerPath(ctx, remotePath);
   throwIfAborted(signal);
 
   // Get remote file size
   let total = 0;
   try {
-    total = await conn.client.size(remoteServerPath);
+    total = await ctx.client.size(remoteServerPath);
   } catch {
-    // Fall back to non-resume download (use impl to avoid mutex deadlock)
-    return downloadImpl(connId, remotePath, localPath, onProgress, signal);
+    // Fall back to non-resume download
+    return downloadImpl(ctx, remotePath, localPath, onProgress, signal);
   }
 
   // Check local file size for resume
@@ -437,7 +480,7 @@ async function resumeDownload(
   throttle.pipe(writeStream);
 
   try {
-    await conn.client.downloadTo(throttle, remoteServerPath, localSize);
+    await ctx.client.downloadTo(throttle, remoteServerPath, localSize);
     await streamClosed;
   } finally {
     cleanupAbort();
@@ -485,11 +528,18 @@ export async function uploadDir(
   await mkdir(connId, remoteDir);
   await createDirs(localDir, remoteDir);
 
-  for (let i = 0; i < allFiles.length; i += 1) {
+  // Upload files in parallel batches (pool handles per-client serialization)
+  const BATCH_SIZE = MAX_SESSIONS_PER_CONN;
+  let completed = 0;
+  for (let i = 0; i < allFiles.length; i += BATCH_SIZE) {
     throwIfAborted(signal);
-    const file = allFiles[i];
-    await upload(connId, file.local, file.remote, undefined, signal);
-    onProgress?.(file.local, i + 1, allFiles.length);
+    const batch = allFiles.slice(i, i + BATCH_SIZE);
+    await Promise.all(batch.map((f) =>
+      upload(connId, f.local, f.remote, undefined, signal).then(() => {
+        completed += 1;
+        onProgress?.(f.local, completed, allFiles.length);
+      }),
+    ));
   }
 }
 
@@ -521,28 +571,38 @@ export async function downloadDir(
   };
   await gather(remoteDir, localDir);
 
-  for (let i = 0; i < allFiles.length; i += 1) {
+  // Download files in parallel batches
+  const BATCH_SIZE = MAX_SESSIONS_PER_CONN;
+  let completed = 0;
+  for (let i = 0; i < allFiles.length; i += BATCH_SIZE) {
     throwIfAborted(signal);
-    const file = allFiles[i];
-    await download(connId, file.remote, file.local, undefined, signal);
-    onProgress?.(file.remote, i + 1, allFiles.length);
+    const batch = allFiles.slice(i, i + BATCH_SIZE);
+    await Promise.all(batch.map((f) =>
+      download(connId, f.remote, f.local, undefined, signal).then(() => {
+        completed += 1;
+        onProgress?.(f.remote, completed, allFiles.length);
+      }),
+    ));
   }
 }
 
 export async function deleteDir(connId: string, dirPath: string): Promise<void> {
-  const conn = getConn(connId);
   const entries = await list(connId, dirPath);
 
   for (const entry of entries) {
     if (entry.isDirectory) {
       await deleteDir(connId, entry.path);
     } else {
-      await conn.client.remove(resolveServerPath(conn, entry.path));
+      await withSession(connId, async (ctx) => {
+        await ctx.client.remove(resolveServerPath(ctx, entry.path));
+      });
     }
   }
 
   // Remove the now-empty directory
-  await conn.client.removeDir(resolveServerPath(conn, dirPath));
+  await withSession(connId, async (ctx) => {
+    await ctx.client.removeDir(resolveServerPath(ctx, dirPath));
+  });
 }
 
 // ── Search ──────────────────────────────────────────────────────
@@ -603,28 +663,28 @@ function joinVirtualPath(basePath: string, name: string): string {
   return basePath === '/' ? `/${name}` : `${basePath}/${name}`;
 }
 
-function resolveServerPath(conn: PooledFTP, targetPath: string): string {
+function resolveServerPath(ctx: FTPContext, targetPath: string): string {
   const normalizedTargetPath = normalizeAbsolutePath(targetPath);
-  if (conn.rootDir === '/') {
+  if (ctx.rootDir === '/') {
     return normalizedTargetPath;
   }
   if (normalizedTargetPath === '/') {
-    return conn.rootDir;
+    return ctx.rootDir;
   }
-  return path.posix.join(conn.rootDir, normalizedTargetPath.slice(1));
+  return path.posix.join(ctx.rootDir, normalizedTargetPath.slice(1));
 }
 
-async function resetWorkingDir(conn: PooledFTP): Promise<void> {
+async function resetWorkingDir(ctx: FTPContext): Promise<void> {
   try {
-    await conn.client.cd(conn.rootDir);
+    await ctx.client.cd(ctx.rootDir);
   } catch {
     // Ignore — absolute path operations do not rely on the current directory.
   }
 }
 
-async function listDirectory(conn: PooledFTP, dirPath: string): Promise<FileInfo[]> {
+async function listDirectory(ctx: FTPContext, dirPath: string): Promise<FileInfo[]> {
   try {
-    return await conn.client.list(resolveServerPath(conn, dirPath));
+    return await ctx.client.list(resolveServerPath(ctx, dirPath));
   } catch (error) {
     if (dirPath !== '/') {
       throw error;
@@ -633,8 +693,8 @@ async function listDirectory(conn: PooledFTP, dirPath: string): Promise<FileInfo
     // Some FTP servers reject LIST on absolute root paths even though the
     // login directory itself is readable. Re-anchor to the session root and
     // list the current directory instead.
-    await resetWorkingDir(conn);
-    return conn.client.list();
+    await resetWorkingDir(ctx);
+    return ctx.client.list();
   }
 }
 

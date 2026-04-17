@@ -20,7 +20,9 @@ function createTransfer(overrides: Partial<TransferItem>): TransferItem {
   };
 }
 
-test('blocks same-connection FTP work while a cancelled transfer is still unwinding', () => {
+test('hasRunningTransferForConnection still reports same-connection running FTP work', () => {
+  // The gate was removed from canStartTransfer (FTP pool handles concurrency),
+  // but the helper is still useful for UI / introspection.
   const activeCancelled = createTransfer({
     id: 'active',
     status: 'cancelled',
@@ -36,7 +38,15 @@ test('blocks same-connection FTP work while a cancelled transfer is still unwind
     hasRunningTransferForConnection(queue, runningTransferIds, 'ftp', 'connection-1', 'queued'),
     true,
   );
-  assert.equal(canStartTransfer(queuedSameConnection, queue, runningTransferIds), false);
+});
+
+test('FTP transfers on same connection can now run in parallel (pool handles serialization)', () => {
+  const active = createTransfer({ id: 'active', status: 'queued' });
+  const queued = createTransfer({ id: 'queued', status: 'queued' });
+  const queue = [active, queued];
+  const runningTransferIds = new Set<string>(['active']);
+
+  assert.equal(canStartTransfer(queued, queue, runningTransferIds), true);
 });
 
 test('allows FTP work to start on a different connection', () => {

@@ -768,9 +768,17 @@ export default function App() {
         try {
           const fileName = item.name || item.path.split(/[\\/]/).pop() || item.path;
           let remote = joinChildPath(targetPath, fileName);
-          const localEntry = typeof item.isDirectory === 'boolean'
-            ? { isDirectory: item.isDirectory }
-            : await bridgefile.fs.stat(item.path);
+          let localEntry: { isDirectory: boolean };
+          if (typeof item.isDirectory === 'boolean') {
+            localEntry = { isDirectory: item.isDirectory };
+          } else {
+            const stat = await bridgefile.fs.stat(item.path);
+            if (!stat) {
+              logError(`Desktop drop: local file not found: ${item.path}`);
+              continue;
+            }
+            localEntry = stat;
+          }
 
           // Check if destination exists
           const destEntry = await getRemoteEntryIfExists(remote);
