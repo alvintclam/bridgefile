@@ -1,4 +1,5 @@
 import React, { useState, useEffect } from 'react';
+import { useEscClose } from '../hooks/useEscClose';
 
 export interface Preferences {
   theme: 'dark' | 'light';
@@ -33,17 +34,7 @@ export default function PreferencesDialog({ isOpen, onClose, preferences, onSave
     if (isOpen) setDraft(preferences);
   }, [isOpen, preferences]);
 
-  useEffect(() => {
-    if (!isOpen) return;
-    const handler = (e: KeyboardEvent) => {
-      if (e.key === 'Escape') {
-        e.preventDefault();
-        onClose();
-      }
-    };
-    window.addEventListener('keydown', handler);
-    return () => window.removeEventListener('keydown', handler);
-  }, [isOpen, onClose]);
+  useEscClose(isOpen, onClose);
 
   if (!isOpen) return null;
 
@@ -57,8 +48,16 @@ export default function PreferencesDialog({ isOpen, onClose, preferences, onSave
   };
 
   return (
-    <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/60">
-      <div className="bg-[#12121a] border border-[#1e1e2e] rounded-lg shadow-2xl w-full max-w-lg mx-4">
+    <div
+      className="fixed inset-0 z-50 flex items-center justify-center bg-black/60 p-4"
+      role="dialog"
+      aria-modal="true"
+      onClick={onClose}
+    >
+      <div
+        className="bg-[#12121a] border border-[#1e1e2e] rounded-lg shadow-2xl w-full max-w-lg"
+        onClick={(e) => e.stopPropagation()}
+      >
         <div className="flex items-center justify-between px-4 py-3 border-b border-[#1e1e2e]">
           <h3 className="text-sm font-semibold text-[#e4e4e7]">Preferences</h3>
           <button

@@ -1,4 +1,5 @@
 import React, { useState, useEffect, useCallback } from 'react';
+import { useEscClose } from '../hooks/useEscClose';
 
 // ── Types ──────────────────────────────────────────────────────
 
@@ -71,6 +72,7 @@ export default function DirectoryCompare({
   protocol,
   connectionId,
 }: DirectoryCompareProps) {
+  useEscClose(isOpen, onClose);
   const [entries, setEntries] = useState<CompareEntry[]>([]);
   const [loading, setLoading] = useState(false);
   const [hideIdentical, setHideIdentical] = useState(false);
@@ -249,8 +251,16 @@ export default function DirectoryCompare({
   };
 
   return (
-    <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/60 backdrop-blur-sm">
-      <div className="w-[800px] max-h-[600px] bg-[#12121a] border border-[#1e1e2e] rounded-lg shadow-2xl flex flex-col overflow-hidden">
+    <div
+      className="fixed inset-0 z-50 flex items-center justify-center bg-black/60 backdrop-blur-sm p-4"
+      role="dialog"
+      aria-modal="true"
+      onClick={onClose}
+    >
+      <div
+        className="w-full max-w-[800px] h-full max-h-[600px] min-h-0 bg-[#12121a] border border-[#1e1e2e] rounded-lg shadow-2xl flex flex-col overflow-hidden"
+        onClick={(e) => e.stopPropagation()}
+      >
         {/* Header */}
         <div className="flex items-center justify-between p-3 border-b border-[#1e1e2e]">
           <div>

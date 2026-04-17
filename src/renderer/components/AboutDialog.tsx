@@ -1,4 +1,5 @@
 import React, { useEffect, useState } from 'react';
+import { useEscClose } from '../hooks/useEscClose';
 
 interface AboutDialogProps {
   isOpen: boolean;
@@ -10,6 +11,7 @@ function isElectron(): boolean {
 }
 
 export default function AboutDialog({ isOpen, onClose }: AboutDialogProps) {
+  useEscClose(isOpen, onClose);
   const [version, setVersion] = useState<string>('');
   const [platform, setPlatform] = useState<string>('');
 
@@ -23,7 +25,9 @@ export default function AboutDialog({ isOpen, onClose }: AboutDialogProps) {
 
   return (
     <div
-      className="fixed inset-0 z-50 flex items-center justify-center bg-black/60"
+      className="fixed inset-0 z-50 flex items-center justify-center bg-black/60 p-4"
+      role="dialog"
+      aria-modal="true"
       onClick={onClose}
     >
       <div

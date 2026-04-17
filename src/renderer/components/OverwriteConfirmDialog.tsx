@@ -1,5 +1,6 @@
 import React, { useState } from 'react';
 import { formatFileSize } from '../hooks/useFileOperations';
+import { useEscClose } from '../hooks/useEscClose';
 
 // ── Types ─────────────────────────────────────────────────────────
 
@@ -61,6 +62,9 @@ export default function OverwriteConfirmDialog({
 }) {
   const [applyToAll, setApplyToAll] = useState(false);
 
+  // Esc = skip (default safe action)
+  useEscClose(request.visible, () => onResponse('skip', false));
+
   const { sourceInfo, destInfo, sourceName, isDirectory, protocol } = request;
   const resumeDisabled = protocol === 's3' || isDirectory;
 
@@ -70,8 +74,12 @@ export default function OverwriteConfirmDialog({
     sourceInfo && destInfo ? sourceInfo.size !== destInfo.size : null;
 
   return (
-    <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/60">
-      <div className="bg-[#12121a] border border-[#1e1e2e] rounded-lg shadow-2xl w-full max-w-md mx-4">
+    <div
+      className="fixed inset-0 z-50 flex items-center justify-center bg-black/60 p-4"
+      role="dialog"
+      aria-modal="true"
+    >
+      <div className="bg-[#12121a] border border-[#1e1e2e] rounded-lg shadow-2xl w-full max-w-md">
         {/* Header */}
         <div className="px-4 pt-4 pb-2">
           <h3 className="text-sm font-semibold text-[#e4e4e7]">

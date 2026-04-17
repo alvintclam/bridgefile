@@ -182,6 +182,19 @@ export default function App() {
     return unsubscribe;
   }, []);
 
+  // Detect platform for macOS traffic-light padding
+  useEffect(() => {
+    if (typeof window === 'undefined' || !window.bridgefile) {
+      // Fallback to navigator for browser/dev mode
+      setIsMac(typeof navigator !== 'undefined' && /Mac/.test(navigator.platform));
+      return;
+    }
+    window.bridgefile.app
+      .getPlatform()
+      .then((p: string) => setIsMac(p === 'darwin'))
+      .catch(() => setIsMac(false));
+  }, []);
+
   // Check if user has existing connections (for welcome screen)
   useEffect(() => {
     if (typeof window === 'undefined' || !window.bridgefile) {
@@ -245,6 +258,7 @@ export default function App() {
   const [showShortcuts, setShowShortcuts] = useState(false);
   const [showAbout, setShowAbout] = useState(false);
   const [hasConnectedBefore, setHasConnectedBefore] = useState<boolean | null>(null);
+  const [isMac, setIsMac] = useState(false);
 
   const handleSavePreferences = useCallback((next: Preferences) => {
     setPreferences(next);
@@ -860,6 +874,7 @@ export default function App() {
         onToggleTheme={toggleTheme}
         syncBrowsing={syncBrowsing}
         onToggleSyncBrowsing={handleToggleSyncBrowsing}
+        isMac={isMac}
       />
 
       {/* Tab bar for multi-session tabs */}
@@ -921,8 +936,14 @@ export default function App() {
           <div className="absolute inset-y-0 -left-1 -right-1" />
         </div>
 
-        {/* Remote pane */}
-        <div style={{ width: `${100 - dividerPos}%` }} className="min-w-0">
+        {/* Remote pane — WelcomeScreen for first-time users, otherwise FilePane */}
+        <div style={{ width: `${100 - dividerPos}%` }} className="min-w-0 flex">
+          {hasConnectedBefore === false && tabs.length === 0 ? (
+            <WelcomeScreen
+              onNewConnection={() => setShowConnectionManager(true)}
+              onShowShortcuts={() => setShowShortcuts(true)}
+            />
+          ) : (
           <FilePane
             side="remote"
             label="Remote"
@@ -978,6 +999,7 @@ export default function App() {
               setShowPermissions(true);
             }}
           />
+          )}
         </div>
       </div>
 

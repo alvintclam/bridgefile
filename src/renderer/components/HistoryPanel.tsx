@@ -1,4 +1,5 @@
 import React, { useState, useEffect, useMemo, useCallback } from 'react';
+import { t } from '../lib/i18n';
 
 interface HistoryEntry {
   id: string;
@@ -113,22 +114,22 @@ export default function HistoryPanel() {
       <div className="flex items-center gap-2 px-3 py-2 border-b border-[#1e1e2e] shrink-0">
         <input
           type="text"
-          placeholder="Filter by file/path/protocol…"
+          placeholder={t('history_filter_placeholder')}
           value={filter}
           onChange={(e) => setFilter(e.target.value)}
           className="flex-1 bg-[#0a0a0f] border border-[#1e1e2e] rounded px-2 py-1 text-[11px] text-[#e4e4e7] placeholder-[#52525b] focus:outline-none focus:border-[#3b82f6]"
-          aria-label="Filter history entries"
+          aria-label={t('history_filter_placeholder')}
         />
         <select
           value={statusFilter}
           onChange={(e) => setStatusFilter(e.target.value as StatusFilter)}
           className="bg-[#0a0a0f] border border-[#1e1e2e] rounded px-2 py-1 text-[11px] text-[#a1a1aa] focus:outline-none focus:border-[#3b82f6]"
-          aria-label="Filter by status"
+          aria-label={t('history_col_status')}
         >
-          <option value="all">All</option>
-          <option value="completed">Completed</option>
-          <option value="failed">Failed</option>
-          <option value="cancelled">Cancelled</option>
+          <option value="all">{t('history_all')}</option>
+          <option value="completed">{t('history_completed')}</option>
+          <option value="failed">{t('history_failed')}</option>
+          <option value="cancelled">{t('history_cancelled')}</option>
         </select>
         <button
           onClick={load}
@@ -143,7 +144,7 @@ export default function HistoryPanel() {
           className="px-2 py-1 text-[11px] rounded text-red-400/80 hover:text-red-400 hover:bg-red-500/10"
           aria-label="Clear all history"
         >
-          Clear
+          {t('clear')}
         </button>
       </div>
 
@@ -151,23 +152,23 @@ export default function HistoryPanel() {
       <div className="flex-1 min-h-0 overflow-auto">
         {loading ? (
           <div className="flex items-center justify-center h-full text-xs text-[#71717a]">
-            Loading history…
+            {t('history_loading')}
           </div>
         ) : filtered.length === 0 ? (
           <div className="flex items-center justify-center h-full text-xs text-[#71717a]">
-            {entries.length === 0 ? 'No transfer history yet' : 'No matches'}
+            {entries.length === 0 ? t('history_empty') : t('history_no_matches')}
           </div>
         ) : (
           <table className="w-full text-[11px]">
             <thead className="sticky top-0 bg-[#12121a] border-b border-[#1e1e2e]">
               <tr className="text-left text-[#71717a]">
-                <th className="px-3 py-1.5 font-medium">When</th>
-                <th className="px-3 py-1.5 font-medium">Dir</th>
-                <th className="px-3 py-1.5 font-medium">File</th>
-                <th className="px-3 py-1.5 font-medium">Size</th>
-                <th className="px-3 py-1.5 font-medium">Proto</th>
-                <th className="px-3 py-1.5 font-medium">Duration</th>
-                <th className="px-3 py-1.5 font-medium">Status</th>
+                <th className="px-3 py-1.5 font-medium">{t('history_col_when')}</th>
+                <th className="px-3 py-1.5 font-medium">{t('history_col_dir')}</th>
+                <th className="px-3 py-1.5 font-medium">{t('history_col_file')}</th>
+                <th className="px-3 py-1.5 font-medium">{t('history_col_size')}</th>
+                <th className="px-3 py-1.5 font-medium">{t('history_col_proto')}</th>
+                <th className="px-3 py-1.5 font-medium">{t('history_col_duration')}</th>
+                <th className="px-3 py-1.5 font-medium">{t('history_col_status')}</th>
               </tr>
             </thead>
             <tbody>

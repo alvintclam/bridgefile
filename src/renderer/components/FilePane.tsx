@@ -1322,7 +1322,7 @@ function ContextMenu({
   return (
     <div
       ref={menuRef}
-      className="fixed z-50 min-w-[200px] py-1 bg-[#12121a] border border-[#1e1e2e] rounded-lg shadow-xl"
+      className="fixed z-40 min-w-[200px] py-1 bg-[#12121a] border border-[#1e1e2e] rounded-lg shadow-xl"
       style={{ left: pos.x, top: pos.y }}
       onClick={e => e.stopPropagation()}
     >
@@ -1355,7 +1355,7 @@ function ContextMenu({
         <MenuItem label={t('edit_file')} onClick={onEditFile} />
       )}
       {onOpenExternal && (
-        <MenuItem label="Open in external editor" onClick={onOpenExternal} />
+        <MenuItem label={t('open_external_editor')} onClick={onOpenExternal} />
       )}
       {onChecksum && (
         <MenuItem label={t('checksum')} onClick={onChecksum} />

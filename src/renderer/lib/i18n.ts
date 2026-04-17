@@ -123,6 +123,7 @@ const translations: Record<Locale, Record<string, string>> = {
     'add_bookmark': 'Add Bookmark',
     'export_logs': 'Export Logs',
     'edit_file': 'Edit File',
+    'open_external_editor': 'Open in external editor',
     'chmod': 'Change Permissions',
     'clear': 'Clear',
     'clear_completed': 'Clear completed',
@@ -130,6 +131,33 @@ const translations: Record<Locale, Record<string, string>> = {
     'drop_files': 'Drop files here to transfer',
     'compare_dirs': 'Compare directories',
     'search_files': 'Search...',
+
+    // Transfer queue
+    'resume_transfers': 'Resume transfers',
+    'pause_transfers': 'Pause transfers',
+    'transfers_empty_hint': 'Active and queued transfers will appear here. Drag files between panes or use ⌘/Ctrl+C+V to start a transfer. See the History tab for past transfers.',
+    'transfer_active': 'active',
+    'transfer_paused': 'paused',
+    'transfer_queued': 'queued',
+    'transfer_done': 'done',
+    'transfer_cancelled': 'cancelled',
+
+    // History panel
+    'history_loading': 'Loading history…',
+    'history_empty': 'No transfer history yet',
+    'history_no_matches': 'No matches',
+    'history_filter_placeholder': 'Filter by file/path/protocol…',
+    'history_col_when': 'When',
+    'history_col_dir': 'Dir',
+    'history_col_file': 'File',
+    'history_col_size': 'Size',
+    'history_col_proto': 'Proto',
+    'history_col_duration': 'Duration',
+    'history_col_status': 'Status',
+    'history_all': 'All',
+    'history_completed': 'Completed',
+    'history_failed': 'Failed',
+    'history_cancelled': 'Cancelled',
   },
 
   'zh-TW': {
@@ -245,6 +273,34 @@ const translations: Record<Locale, Record<string, string>> = {
     'drop_files': '\u62d6\u66f3\u6a94\u6848\u4ee5\u50b3\u8f38',
     'compare_dirs': '\u6bd4\u8f03\u8cc7\u6599\u593e',
     'search_files': '\u641c\u5c0b...',
+    'open_external_editor': '以外部編輯器開啟',
+
+    // Transfer queue
+    'resume_transfers': '繼續傳輸',
+    'pause_transfers': '暫停傳輸',
+    'transfers_empty_hint': '使用中及排隊的傳輸會在此顯示。在窗格之間拖曳檔案，或按 ⌘/Ctrl+C+V 開始傳輸。歷史紀錄請查看「歷史」分頁。',
+    'transfer_active': '進行中',
+    'transfer_paused': '已暫停',
+    'transfer_queued': '排隊中',
+    'transfer_done': '完成',
+    'transfer_cancelled': '已取消',
+
+    // History panel
+    'history_loading': '載入歷史中…',
+    'history_empty': '尚無傳輸紀錄',
+    'history_no_matches': '沒有相符結果',
+    'history_filter_placeholder': '依檔名／路徑／協議篩選…',
+    'history_col_when': '時間',
+    'history_col_dir': '方向',
+    'history_col_file': '檔案',
+    'history_col_size': '大小',
+    'history_col_proto': '協議',
+    'history_col_duration': '耗時',
+    'history_col_status': '狀態',
+    'history_all': '全部',
+    'history_completed': '已完成',
+    'history_failed': '失敗',
+    'history_cancelled': '已取消',
   },
 };
 

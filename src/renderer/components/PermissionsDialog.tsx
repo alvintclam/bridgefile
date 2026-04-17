@@ -1,4 +1,5 @@
 import React, { useState, useMemo, useCallback } from 'react';
+import { useEscClose } from '../hooks/useEscClose';
 
 interface PermissionsDialogProps {
   isOpen: boolean;
@@ -60,6 +61,7 @@ export default function PermissionsDialog({
   onClose,
   onApply,
 }: PermissionsDialogProps) {
+  useEscClose(isOpen, onClose);
   const initialBits = useMemo(() => {
     if (currentPermissions) {
       return parsePermString(currentPermissions);
@@ -109,8 +111,16 @@ export default function PermissionsDialog({
   if (!isOpen) return null;
 
   return (
-    <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/60 backdrop-blur-sm">
-      <div className="w-[400px] bg-[#12121a] border border-[#1e1e2e] rounded-lg shadow-2xl">
+    <div
+      className="fixed inset-0 z-50 flex items-center justify-center bg-black/60 backdrop-blur-sm p-4"
+      role="dialog"
+      aria-modal="true"
+      onClick={onClose}
+    >
+      <div
+        className="w-full max-w-[400px] bg-[#12121a] border border-[#1e1e2e] rounded-lg shadow-2xl"
+        onClick={(e) => e.stopPropagation()}
+      >
         {/* Header */}
         <div className="flex items-center justify-between p-3 border-b border-[#1e1e2e]">
           <div>

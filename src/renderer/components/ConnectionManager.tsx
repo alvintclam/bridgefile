@@ -15,6 +15,7 @@ import type {
 } from '../../shared/connection-profile-ui';
 import { t } from '../lib/i18n';
 import { exportToJSON, importAuto, type ImportedProfile } from '../lib/profile-io';
+import { useEscClose } from '../hooks/useEscClose';
 import { logConnection, logConnected, logError } from './LogPanel';
 export type { UIConnectionProfile as ConnectionProfile } from '../../shared/connection-profile-ui';
 
@@ -44,6 +45,9 @@ export default function ConnectionManager({
   const [groups, setGroups] = useState<string[]>(DEFAULT_GROUPS);
   const [collapsedGroups, setCollapsedGroups] = useState<Set<string>>(new Set());
   const [newGroupName, setNewGroupName] = useState<string | null>(null);
+  // Test connection state — declared at top level to satisfy Rules of Hooks
+  const [testResult, setTestResult] = useState<{ ok: boolean; message: string } | null>(null);
+  const [testing, setTesting] = useState(false);
   const [dragProfileId, setDragProfileId] = useState<string | null>(null);
 
   const getEmptyForm = useCallback((tab: ProtocolTab) => {
@@ -98,6 +102,8 @@ export default function ConnectionManager({
       void loadProfiles();
     }
   }, [isOpen, loadProfiles]);
+
+  useEscClose(isOpen, onClose);
 
   if (!isOpen) return null;
 
@@ -251,9 +257,6 @@ export default function ConnectionManager({
   };
 
   // Test connection without saving/persisting
-  const [testResult, setTestResult] = useState<{ ok: boolean; message: string } | null>(null);
-  const [testing, setTesting] = useState(false);
-
   const handleTest = async () => {
     if (!isElectron()) {
       setTestResult({ ok: false, message: 'Desktop app required' });
@@ -488,8 +491,16 @@ export default function ConnectionManager({
   };
 
   return (
-    <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/60 backdrop-blur-sm">
-      <div className="w-[720px] max-h-[600px] bg-[#12121a] border border-[#1e1e2e] rounded-lg shadow-2xl flex overflow-hidden">
+    <div
+      className="fixed inset-0 z-50 flex items-center justify-center bg-black/60 backdrop-blur-sm p-4"
+      role="dialog"
+      aria-modal="true"
+      onClick={onClose}
+    >
+      <div
+        className="w-full max-w-[720px] h-full max-h-[600px] min-h-0 bg-[#12121a] border border-[#1e1e2e] rounded-lg shadow-2xl flex overflow-hidden"
+        onClick={(e) => e.stopPropagation()}
+      >
         {/* Left: Profile list */}
         <div className="w-56 border-r border-[#1e1e2e] flex flex-col">
           <div className="p-3 border-b border-[#1e1e2e]">

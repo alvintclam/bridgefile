@@ -369,7 +369,7 @@ export default function TransferQueue() {
               className="px-2 py-0.5 text-[10px] rounded bg-emerald-500/10 text-emerald-400 hover:bg-emerald-500/20 border border-emerald-500/20 transition-colors"
               title="Resume paused transfers"
             >
-              Resume transfers
+              {t('resume_transfers')}
             </button>
           ) : (
             <button
@@ -377,7 +377,7 @@ export default function TransferQueue() {
               className="px-2 py-0.5 text-[10px] rounded bg-amber-500/10 text-amber-400 hover:bg-amber-500/20 border border-amber-500/20 transition-colors"
               title="Pause active and queued transfers"
             >
-              Pause transfers
+              {t('pause_transfers')}
             </button>
           )}
 
@@ -411,9 +411,7 @@ export default function TransferQueue() {
             </svg>
             <div className="text-[#a1a1aa]">{t('no_transfers')}</div>
             <div className="text-[10px] text-[#52525b] max-w-sm">
-              Active and queued transfers will appear here.
-              Drag files between panes or use ⌘/Ctrl+C+V to start a transfer.
-              See the <span className="text-[#71717a]">History</span> tab for past transfers.
+              {t('transfers_empty_hint')}
             </div>
           </div>
         ) : (

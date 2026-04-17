@@ -13,6 +13,8 @@ interface ConnectionBarProps {
   onToggleTheme?: () => void;
   syncBrowsing?: boolean;
   onToggleSyncBrowsing?: () => void;
+  /** When true, reserve ~80px on the left for macOS traffic-light window controls */
+  isMac?: boolean;
 }
 
 export default function ConnectionBar({
@@ -27,9 +29,15 @@ export default function ConnectionBar({
   onToggleTheme,
   syncBrowsing = false,
   onToggleSyncBrowsing,
+  isMac = false,
 }: ConnectionBarProps) {
   return (
-    <div className="flex items-center justify-between h-11 px-3 bg-[#12121a] border-b border-[#1e1e2e] select-none shrink-0">
+    <div
+      className={`flex items-center justify-between h-11 pr-3 bg-[#12121a] border-b border-[#1e1e2e] select-none shrink-0 ${
+        isMac ? 'pl-20' : 'pl-3'
+      }`}
+      style={{ WebkitAppRegion: 'drag' } as React.CSSProperties}
+    >
       {/* Left: Logo + name */}
       <div className="flex items-center gap-2.5">
         <div className="flex items-center gap-2">
@@ -92,8 +100,11 @@ export default function ConnectionBar({
         )}
       </div>
 
-      {/* Right: Actions */}
-      <div className="flex items-center gap-2">
+      {/* Right: Actions — opt out of drag so buttons stay clickable */}
+      <div
+        className="flex items-center gap-2"
+        style={{ WebkitAppRegion: 'no-drag' } as React.CSSProperties}
+      >
         {/* Status indicator */}
         <div className="flex items-center gap-1.5 mr-1">
           <div

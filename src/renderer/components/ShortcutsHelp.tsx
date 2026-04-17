@@ -1,4 +1,5 @@
 import React from 'react';
+import { useEscClose } from '../hooks/useEscClose';
 
 interface ShortcutsHelpProps {
   isOpen: boolean;
@@ -60,11 +61,14 @@ const GROUPS: ShortcutGroup[] = [
 ];
 
 export default function ShortcutsHelp({ isOpen, onClose }: ShortcutsHelpProps) {
+  useEscClose(isOpen, onClose);
   if (!isOpen) return null;
 
   return (
     <div
-      className="fixed inset-0 z-50 flex items-center justify-center bg-black/60"
+      className="fixed inset-0 z-50 flex items-center justify-center bg-black/60 p-4"
+      role="dialog"
+      aria-modal="true"
       onClick={onClose}
     >
       <div

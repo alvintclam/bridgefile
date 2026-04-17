@@ -1,4 +1,5 @@
 import React, { useState } from 'react';
+import { useEscClose } from '../hooks/useEscClose';
 
 interface ChecksumDialogProps {
   isOpen: boolean;
@@ -29,6 +30,7 @@ export default function ChecksumDialog({
   connectionId,
   fileName,
 }: ChecksumDialogProps) {
+  useEscClose(isOpen, onClose);
   const [algorithm, setAlgorithm] = useState<Algorithm>('sha256');
   const [localHash, setLocalHash] = useState<string | null>(null);
   const [remoteHash, setRemoteHash] = useState<string | null>(null);
@@ -79,8 +81,16 @@ export default function ChecksumDialog({
     localHash !== null && remoteHash !== null && localHash !== remoteHash;
 
   return (
-    <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/60 backdrop-blur-sm">
-      <div className="w-[520px] bg-[#12121a] border border-[#1e1e2e] rounded-lg shadow-2xl">
+    <div
+      className="fixed inset-0 z-50 flex items-center justify-center bg-black/60 backdrop-blur-sm p-4"
+      role="dialog"
+      aria-modal="true"
+      onClick={onClose}
+    >
+      <div
+        className="w-full max-w-[520px] bg-[#12121a] border border-[#1e1e2e] rounded-lg shadow-2xl"
+        onClick={(e) => e.stopPropagation()}
+      >
         {/* Header */}
         <div className="flex items-center justify-between p-3 border-b border-[#1e1e2e]">
           <h2 className="text-sm font-semibold text-[#e4e4e7]">
