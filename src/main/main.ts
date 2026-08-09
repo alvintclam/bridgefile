@@ -1,9 +1,13 @@
 import { app, BrowserWindow } from 'electron';
 import * as path from 'path';
 import { registerIPCHandlers } from './ipc-handlers';
+import { applySeedMode } from './seed';
 import './auto-updater';
 
-const isDev = !app.isPackaged;
+applySeedMode();
+
+const isSeedMode = process.env.BRIDGEFILE_SEED === 'screenshots';
+const isDev = !app.isPackaged && !isSeedMode;
 
 let mainWindow: BrowserWindow | null = null;
 

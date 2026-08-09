@@ -1,0 +1,81 @@
+[
+  {
+    "id": "demo-production-sftp",
+    "name": "Production — web",
+    "protocol": "sftp",
+    "host": "production.example.com",
+    "port": 22,
+    "username": "deploy",
+    "authType": "key",
+    "privateKeyPath": "~/.ssh/id_ed25519",
+    "defaultPath": "/var/www/app",
+    "group": "Production",
+    "favorite": true,
+    "keepAlive": 30,
+    "timeout": 30
+  },
+  {
+    "id": "demo-staging-sftp",
+    "name": "Staging — web",
+    "protocol": "sftp",
+    "host": "staging.example.com",
+    "port": 22,
+    "username": "deploy",
+    "authType": "key",
+    "privateKeyPath": "~/.ssh/id_ed25519",
+    "defaultPath": "/var/www/app",
+    "group": "Staging",
+    "favorite": false
+  },
+  {
+    "id": "demo-bastion-jump",
+    "name": "DB via bastion",
+    "protocol": "sftp",
+    "host": "db.internal.example.com",
+    "port": 22,
+    "username": "ops",
+    "authType": "key",
+    "privateKeyPath": "~/.ssh/id_ed25519",
+    "group": "Production",
+    "favorite": true,
+    "proxy": {
+      "host": "bastion.example.com",
+      "port": 22,
+      "username": "alvin"
+    }
+  },
+  {
+    "id": "demo-r2-bucket",
+    "name": "Cloudflare R2 — assets",
+    "protocol": "s3",
+    "bucket": "my-r2-bucket",
+    "prefix": "team-a/uploads/",
+    "region": "auto",
+    "endpoint": "https://account.r2.cloudflarestorage.com",
+    "singleBucket": true,
+    "group": "S3",
+    "favorite": true
+  },
+  {
+    "id": "demo-aws-s3",
+    "name": "AWS S3 — my-company-assets",
+    "protocol": "s3",
+    "bucket": "my-company-assets",
+    "prefix": "team-a/uploads/",
+    "region": "us-east-1",
+    "singleBucket": true,
+    "group": "S3",
+    "favorite": false
+  },
+  {
+    "id": "demo-ftps",
+    "name": "Legacy FTPS upload",
+    "protocol": "ftp",
+    "host": "ftp.partner.example.com",
+    "port": 21,
+    "username": "uploader",
+    "authType": "password",
+    "tls": "explicit",
+    "group": "Partners"
+  }
+]

@@ -1,0 +1,20 @@
+[
+  {
+    "id": "bm-releases",
+    "connectionId": "demo-production-sftp",
+    "label": "Releases",
+    "path": "/var/www/app/releases"
+  },
+  {
+    "id": "bm-logs",
+    "connectionId": "demo-production-sftp",
+    "label": "Nginx logs",
+    "path": "/var/log/nginx"
+  },
+  {
+    "id": "bm-r2-uploads",
+    "connectionId": "demo-r2-bucket",
+    "label": "Team A uploads",
+    "path": "team-a/uploads/"
+  }
+]
